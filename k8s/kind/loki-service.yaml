@@ -1,0 +1,20 @@
+# Kubernetes API version for Service.
+apiVersion: v1
+# Resource kind exposing Loki ingest/query API.
+kind: Service
+metadata:
+  # Service DNS name used by Alloy and Grafana.
+  name: task-queue-loki
+  # Namespace where service is created.
+  namespace: task-queue
+spec:
+  # Select Loki pod(s).
+  selector:
+    app: task-queue-loki
+  ports:
+    # Logical HTTP port name.
+    - name: http
+      # Service port for Loki API.
+      port: 3100
+      # Destination container port name.
+      targetPort: http

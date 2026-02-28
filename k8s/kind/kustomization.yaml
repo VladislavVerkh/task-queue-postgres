@@ -1,0 +1,85 @@
+# Kustomize API version used by kubectl/kustomize.
+apiVersion: kustomize.config.k8s.io/v1beta1
+# Root object for composition of resources in this folder.
+kind: Kustomization
+# Static manifests applied as-is (in listed order).
+resources:
+  # Namespace definition for all objects.
+  - namespace.yaml
+  # Secret with DB credentials used by Postgres and app.
+  - postgres-secret.yaml
+  # Postgres workload.
+  - postgres-deployment.yaml
+  # Postgres service (cluster + NodePort access).
+  - postgres-service.yaml
+  # Postgres metrics exporter workload.
+  - postgres-exporter-deployment.yaml
+  # Postgres exporter service for Prometheus scraping.
+  - postgres-exporter-service.yaml
+  # Sample app workload.
+  - sample-app-deployment.yaml
+  # Sample app service (HTTP entrypoint).
+  - sample-app-service.yaml
+  # Prometheus workload.
+  - prometheus-deployment.yaml
+  # Prometheus service.
+  - prometheus-service.yaml
+  # Loki workload.
+  - loki-deployment.yaml
+  # Loki service.
+  - loki-service.yaml
+  # RBAC objects for Alloy.
+  - alloy-rbac.yaml
+  # Alloy DaemonSet collecting node logs.
+  - alloy-daemonset.yaml
+  # Grafana workload.
+  - grafana-deployment.yaml
+  # Grafana service.
+  - grafana-service.yaml
+
+# Shared options for all generated ConfigMaps.
+generatorOptions:
+  # Keep generated ConfigMap names stable (no hash suffix) to simplify mounting.
+  disableNameSuffixHash: true
+
+# Generate ConfigMaps from local files.
+configMapGenerator:
+  # SQL init script mounted into Postgres initdb directory.
+  - name: task-queue-postgres-initdb
+    # Namespace where generated ConfigMap will be created.
+    namespace: task-queue
+    files:
+      # "key=path" format: left side becomes file name in ConfigMap.
+      - 001-enable-pg-stat-statements.sql=monitoring/postgres/initdb/001-enable-pg-stat-statements.sql
+  # Prometheus runtime configuration.
+  - name: task-queue-prometheus-config
+    namespace: task-queue
+    files:
+      - prometheus.yml=monitoring/prometheus/prometheus.yml
+  # Loki runtime configuration.
+  - name: task-queue-loki-config
+    namespace: task-queue
+    files:
+      - config.yml=monitoring/loki/loki-config.yml
+  # Alloy (log collector) runtime configuration.
+  - name: task-queue-alloy-config
+    namespace: task-queue
+    files:
+      - config.alloy=monitoring/alloy/config.alloy
+  # Grafana datasource provisioning configuration.
+  - name: task-queue-grafana-datasources
+    namespace: task-queue
+    files:
+      - datasource.yml=monitoring/grafana/provisioning/datasources/datasource.yml
+  # Grafana dashboard provider configuration.
+  - name: task-queue-grafana-dashboards-provider
+    namespace: task-queue
+    files:
+      - dashboards.yml=monitoring/grafana/provisioning/dashboards/dashboards.yml
+  # Grafana dashboard JSON definitions.
+  - name: task-queue-grafana-dashboards
+    namespace: task-queue
+    files:
+      - task-queue-overview.json=monitoring/grafana/dashboards/task-queue-overview.json
+      - java-overview.json=monitoring/grafana/dashboards/java-overview.json
+      - postgres-overview.json=monitoring/grafana/dashboards/postgres-overview.json

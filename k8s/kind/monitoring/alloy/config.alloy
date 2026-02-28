@@ -1,0 +1,105 @@
+// Alloy self-logging configuration.
+logging {
+  // Minimum log level emitted by Alloy.
+  level  = "info"
+  // Log output format.
+  format = "logfmt"
+}
+
+// Discover Kubernetes pod targets via API.
+discovery.kubernetes "pods" {
+  // Discovery role "pod" returns pod-level targets.
+  role = "pod"
+}
+
+// Transform discovered pod targets into labels/paths for file scraping.
+discovery.relabel "pod_logs" {
+  // Input targets from Kubernetes pod discovery component.
+  targets = discovery.kubernetes.pods.targets
+
+  rule {
+    // Read node name label from discovered pod metadata.
+    source_labels = ["__meta_kubernetes_pod_node_name"]
+    // Keep only pods scheduled on current node.
+    regex         = sys.env("NODE_NAME")
+    // Relabel action: keep matching targets, drop others.
+    action        = "keep"
+  }
+
+  rule {
+    // Source metadata label containing namespace.
+    source_labels = ["__meta_kubernetes_namespace"]
+    // Output label name attached to log stream.
+    target_label  = "namespace"
+  }
+
+  rule {
+    // Source metadata label containing pod name.
+    source_labels = ["__meta_kubernetes_pod_name"]
+    // Output label name attached to log stream.
+    target_label  = "pod"
+  }
+
+  rule {
+    // Source metadata label containing container name.
+    source_labels = ["__meta_kubernetes_pod_container_name"]
+    // Output label name attached to log stream.
+    target_label  = "container"
+  }
+
+  rule {
+    // Source metadata label containing node name.
+    source_labels = ["__meta_kubernetes_pod_node_name"]
+    // Output label name attached to log stream.
+    target_label  = "node"
+  }
+
+  rule {
+    // Source metadata label mapped from pod label app.
+    source_labels = ["__meta_kubernetes_pod_label_app"]
+    // Output label name attached to log stream.
+    target_label  = "app"
+  }
+
+  rule {
+    // Use pod UID + container name to build file path.
+    source_labels = ["__meta_kubernetes_pod_uid", "__meta_kubernetes_pod_container_name"]
+    // Separator between concatenated source labels.
+    separator     = "/"
+    // Special label telling file source which paths to read.
+    target_label  = "__path__"
+    // Pattern matching kubelet pod log files under /var/log/pods.
+    replacement   = "/var/log/pods/*$1/*.log"
+  }
+}
+
+// Match log files based on relabeled __path__ targets.
+local.file_match "pod_logs" {
+  // Input list of path targets from relabel stage.
+  path_targets = discovery.relabel.pod_logs.output
+}
+
+// Read log lines from matching files.
+loki.source.file "pods" {
+  // File targets resolved in local.file_match.
+  targets    = local.file_match.pod_logs.targets
+  // Forward raw entries to processing pipeline.
+  forward_to = [loki.process.pods.receiver]
+}
+
+// Process/parse logs before sending to Loki.
+loki.process "pods" {
+  // Parse CRI log line format used by Kubernetes container runtime.
+  stage.cri {}
+
+  // Forward processed logs to Loki writer component.
+  forward_to = [loki.write.default.receiver]
+}
+
+// Write logs to Loki backend.
+loki.write "default" {
+  endpoint {
+    // Loki push API endpoint reachable from Alloy pod.
+    url = "http://task-queue-loki:3100/loki/api/v1/push"
+  }
+}

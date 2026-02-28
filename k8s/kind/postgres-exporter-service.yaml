@@ -1,0 +1,20 @@
+# Kubernetes API version for Service.
+apiVersion: v1
+# Resource kind exposing postgres-exporter metrics endpoint.
+kind: Service
+metadata:
+  # Service name used by Prometheus scrape target.
+  name: task-queue-postgres-exporter
+  # Namespace where service is created.
+  namespace: task-queue
+spec:
+  # Select postgres-exporter pods.
+  selector:
+    app: task-queue-postgres-exporter
+  ports:
+    # Port entry name referenced by probes/scrape config.
+    - name: metrics
+      # Service port for metrics within cluster.
+      port: 9187
+      # Container port name in exporter pod.
+      targetPort: metrics

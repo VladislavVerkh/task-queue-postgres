@@ -1,0 +1,21 @@
+# nonk8s
+# Grafana provisioning file version.
+apiVersion: 1
+
+# Dashboard providers loaded by Grafana.
+providers:
+  - # Provider name shown in Grafana internals.
+    name: task-queue-dashboards
+    # Organization ID where dashboards are provisioned.
+    orgId: 1
+    # Folder name in Grafana UI.
+    folder: Task Queue
+    # Provider type: load dashboards from files.
+    type: file
+    # If true, Grafana keeps orphaned provisioned dashboards; false allows cleanup.
+    disableDeletion: false
+    # How often Grafana rescans folder for dashboard changes.
+    updateIntervalSeconds: 10
+    options:
+      # Directory where dashboard JSON files are mounted.
+      path: /var/lib/grafana/dashboards

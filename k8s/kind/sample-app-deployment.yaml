@@ -1,0 +1,168 @@
+# Kubernetes API version for Deployment resource.
+apiVersion: apps/v1
+# Resource kind managing sample application pods.
+kind: Deployment
+metadata:
+  # Deployment name.
+  name: task-queue-sample-app
+  # Namespace where deployment is created.
+  namespace: task-queue
+  labels:
+    # Common app label for selectors/services.
+    app: task-queue-sample-app
+spec:
+  # Number of app replicas to model multi-instance behavior.
+  replicas: 4
+  selector:
+    matchLabels:
+      # Deployment controls pods with this label.
+      app: task-queue-sample-app
+  template:
+    metadata:
+      labels:
+        # Pod label matched by service selector and anti-affinity.
+        app: task-queue-sample-app
+    spec:
+      affinity:
+        podAntiAffinity:
+          # Soft rule: try to spread replicas across different nodes.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - # Preference weight (1..100), higher means stronger preference.
+              weight: 100
+              podAffinityTerm:
+                # Node label key that defines topology domain (host/node).
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    # Match only same app pods when spreading.
+                    app: task-queue-sample-app
+      initContainers:
+        - # Waits until Postgres accepts connections before starting the app container.
+          name: wait-for-postgres
+          # Image containing pg_isready utility.
+          image: postgres:16-alpine
+          # Reuse local image if already present.
+          imagePullPolicy: IfNotPresent
+          command:
+            # Shell executable for loop script.
+            - sh
+            # Execute command string.
+            - -c
+            # Poll Postgres readiness endpoint until it is available.
+            - >
+              until pg_isready -h task-queue-postgres -p 5432 -U "$POSTGRES_USER" -d "$POSTGRES_DB";
+              do echo "waiting for postgres..."; sleep 2; done
+          env:
+            - # DB user used by pg_isready probe.
+              name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  # Secret containing DB credentials.
+                  name: task-queue-db
+                  # Username key in secret.
+                  key: POSTGRES_USER
+            - # DB name used by pg_isready probe.
+              name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  # Secret containing DB credentials.
+                  name: task-queue-db
+                  # Database name key in secret.
+                  key: POSTGRES_DB
+      containers:
+        - # Container name inside pod.
+          name: sample-app
+          # Image built for kind cluster local testing.
+          image: task-queue-sample-app:kind
+          # Reuse local image if already present.
+          imagePullPolicy: IfNotPresent
+          ports:
+            - # Named HTTP port used by service and probes.
+              name: http
+              # Application HTTP server port.
+              containerPort: 8080
+          env:
+            - # JDBC URL to Postgres service in the same namespace.
+              name: SPRING_DATASOURCE_URL
+              value: jdbc:postgresql://task-queue-postgres:5432/task_queue
+            - # DB username for Spring datasource.
+              name: SPRING_DATASOURCE_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  # Secret containing DB credentials.
+                  name: task-queue-db
+                  # Username key in secret.
+                  key: POSTGRES_USER
+            - # DB password for Spring datasource.
+              name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: task-queue-db
+                  key: POSTGRES_PASSWORD
+            - # Enable task queue runtime workers inside app instance.
+              name: TASK_QUEUE_RUNTIME_ENABLED
+              value: "true"
+            - # Number of workers per app instance.
+              name: TASK_QUEUE_WORKER_COUNT
+              value: "2"
+            - # Total logical partition count used by queue runtime.
+              name: TASK_QUEUE_PARTITION_COUNT
+              value: "40"
+            - # Max JDBC connections in Hikari pool per instance.
+              name: SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE
+              value: "4"
+            - # Min idle JDBC connections kept by Hikari.
+              name: SPRING_DATASOURCE_HIKARI_MINIMUM_IDLE
+              value: "1"
+            - # JVM memory tuning relative to container limits.
+              name: JAVA_TOOL_OPTIONS
+              value: -XX:InitialRAMPercentage=25.0 -XX:MaxRAMPercentage=70.0
+          startupProbe:
+            httpGet:
+              # Health endpoint used during startup phase.
+              path: /actuator/health
+              # Named container port for probe.
+              port: http
+            # Startup probe interval.
+            periodSeconds: 5
+            # Per-probe timeout.
+            timeoutSeconds: 3
+            # Max failures before startup considered failed.
+            failureThreshold: 36
+          readinessProbe:
+            httpGet:
+              # Endpoint indicating app is ready to receive traffic.
+              path: /actuator/health
+              # Named container port for probe.
+              port: http
+            # Readiness probe interval.
+            periodSeconds: 5
+            # Per-probe timeout.
+            timeoutSeconds: 3
+            # Consecutive failures before removing pod from service endpoints.
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              # Endpoint indicating process liveliness.
+              path: /actuator/health
+              # Named container port for probe.
+              port: http
+            # Delay before first liveness probe.
+            initialDelaySeconds: 30
+            # Probe interval.
+            periodSeconds: 10
+            # Per-probe timeout.
+            timeoutSeconds: 3
+            # Consecutive failures before restart.
+            failureThreshold: 6
+          resources:
+            requests:
+              # Guaranteed CPU reservation.
+              cpu: 100m
+              # Guaranteed memory reservation.
+              memory: 256Mi
+            limits:
+              # Max CPU usage allowed.
+              cpu: 1
+              # Max memory usage allowed.
+              memory: 1Gi

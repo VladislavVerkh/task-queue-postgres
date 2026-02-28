@@ -1,0 +1,37 @@
+databaseChangeLog:
+  - changeSet:
+      id: 001-task-queue-init
+      author: task-queue
+      changes:
+        - sqlFile:
+            path: changes/001-task-queue-init.sql
+            relativeToChangelogFile: true
+            splitStatements: true
+            stripComments: false
+  - changeSet:
+      id: 002-index-naming-and-cleanup-index
+      author: task-queue
+      changes:
+        - sqlFile:
+            path: changes/002-index-naming-and-cleanup-index.sql
+            relativeToChangelogFile: true
+            splitStatements: true
+            stripComments: false
+  - changeSet:
+      id: 003-worker-tables-autovacuum
+      author: task-queue
+      changes:
+        - sqlFile:
+            path: changes/003-worker-tables-autovacuum.sql
+            relativeToChangelogFile: true
+            splitStatements: true
+            stripComments: false
+  - changeSet:
+      id: 004-task-queue-fetch-index-with-created-at
+      author: task-queue
+      changes:
+        - sqlFile:
+            path: changes/004-task-queue-fetch-index-with-created-at.sql
+            relativeToChangelogFile: true
+            splitStatements: true
+            stripComments: false

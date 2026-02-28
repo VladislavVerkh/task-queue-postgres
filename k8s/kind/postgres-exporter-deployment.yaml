@@ -1,0 +1,94 @@
+# Kubernetes API version for Deployment resource.
+apiVersion: apps/v1
+# Resource kind managing postgres-exporter pod replicas.
+kind: Deployment
+metadata:
+  # Deployment name.
+  name: task-queue-postgres-exporter
+  # Namespace where deployment is created.
+  namespace: task-queue
+  labels:
+    # Common app label for selectors and service.
+    app: task-queue-postgres-exporter
+spec:
+  # Number of exporter replicas.
+  replicas: 1
+  selector:
+    matchLabels:
+      # Deployment controls pods with this label.
+      app: task-queue-postgres-exporter
+  template:
+    metadata:
+      labels:
+        # Pod label matched by service selector.
+        app: task-queue-postgres-exporter
+    spec:
+      containers:
+        - # Container name inside pod.
+          name: postgres-exporter
+          # postgres-exporter image version.
+          image: prometheuscommunity/postgres-exporter:v0.19.1
+          # Reuse local image if already present.
+          imagePullPolicy: IfNotPresent
+          ports:
+            - # Named metrics port used by service/probes.
+              name: metrics
+              # Exporter HTTP port.
+              containerPort: 9187
+          env:
+            - # Postgres connection URI without credentials.
+              name: DATA_SOURCE_URI
+              value: task-queue-postgres:5432/task_queue?sslmode=disable
+            - # Username for exporter DB connection.
+              name: DATA_SOURCE_USER
+              valueFrom:
+                secretKeyRef:
+                  # Secret with DB credentials.
+                  name: task-queue-db
+                  # Key for username.
+                  key: POSTGRES_USER
+            - # Password for exporter DB connection.
+              name: DATA_SOURCE_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: task-queue-db
+                  key: POSTGRES_PASSWORD
+          readinessProbe:
+            httpGet:
+              # Endpoint checked for readiness.
+              path: /
+              # Named container port to query.
+              port: metrics
+            # Delay before first readiness probe.
+            initialDelaySeconds: 5
+            # Probe interval.
+            periodSeconds: 5
+            # Per-probe timeout.
+            timeoutSeconds: 3
+            # Consecutive failures to mark unready.
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              # Endpoint checked for liveness.
+              path: /
+              # Named container port to query.
+              port: metrics
+            # Delay before first liveness probe.
+            initialDelaySeconds: 20
+            # Probe interval.
+            periodSeconds: 10
+            # Per-probe timeout.
+            timeoutSeconds: 3
+            # Consecutive failures before restart.
+            failureThreshold: 6
+          resources:
+            requests:
+              # Guaranteed CPU reservation.
+              cpu: 50m
+              # Guaranteed memory reservation.
+              memory: 64Mi
+            limits:
+              # Max CPU usage allowed.
+              cpu: 250m
+              # Max memory usage allowed.
+              memory: 256Mi

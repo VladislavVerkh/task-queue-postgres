@@ -1,0 +1,48 @@
+# Disable auth for local single-tenant setup.
+auth_enabled: false
+
+server:
+  # HTTP port for Loki API (ingest + query).
+  http_listen_port: 3100
+
+common:
+  # Base directory for Loki local files.
+  path_prefix: /loki
+  storage:
+    filesystem:
+      # Directory for log chunks.
+      chunks_directory: /loki/chunks
+      # Directory for ruler files/rules storage.
+      rules_directory: /loki/rules
+  # Number of replicas writing same data (1 for single-node local mode).
+  replication_factor: 1
+  ring:
+    kvstore:
+      # Use in-memory ring backend (no external consul/etcd needed).
+      store: inmemory
+
+schema_config:
+  configs:
+    - # Date from which this schema config becomes active.
+      from: 2024-01-01
+      # Index store implementation.
+      store: tsdb
+      # Object/chunk storage backend.
+      object_store: filesystem
+      # Loki schema version.
+      schema: v13
+      index:
+        # Prefix for index tables/files.
+        prefix: index_
+        # Duration per index period.
+        period: 24h
+
+limits_config:
+  # Disable structured metadata feature for compatibility with current setup.
+  allow_structured_metadata: false
+  # Enable volume endpoint/features in Loki.
+  volume_enabled: true
+
+analytics:
+  # Disable anonymous usage reporting.
+  reporting_enabled: false

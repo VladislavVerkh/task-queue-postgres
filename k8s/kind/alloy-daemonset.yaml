@@ -1,0 +1,129 @@
+# Kubernetes API version for DaemonSet resource.
+apiVersion: apps/v1
+# Resource kind that runs one pod per node.
+kind: DaemonSet
+metadata:
+  # DaemonSet name.
+  name: task-queue-alloy
+  # Namespace where DaemonSet is created.
+  namespace: task-queue
+  labels:
+    # Common app label for selection/identification.
+    app: task-queue-alloy
+spec:
+  selector:
+    matchLabels:
+      # DaemonSet manages pods with this label.
+      app: task-queue-alloy
+  template:
+    metadata:
+      labels:
+        # Pod label used by selector.
+        app: task-queue-alloy
+    spec:
+      # ServiceAccount granting Kubernetes discovery permissions.
+      serviceAccountName: task-queue-alloy
+      containers:
+        - # Container name inside pod.
+          name: alloy
+          # Alloy image version.
+          image: grafana/alloy:v1.12.1
+          # Reuse local image if already present.
+          imagePullPolicy: IfNotPresent
+          args:
+            # Run Alloy in agent mode.
+            - run
+            # Enable Alloy internal HTTP server for health and debug.
+            - --server.http.listen-addr=0.0.0.0:12345
+            # Local storage directory for Alloy components.
+            - --storage.path=/var/lib/alloy/data
+            # Path to main Alloy config file.
+            - /etc/alloy/config.alloy
+          env:
+            - # Env var passed into config to keep logs only from current node.
+              name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  # FieldPath from Pod spec metadata.
+                  fieldPath: spec.nodeName
+          ports:
+            - # Named HTTP port for health probes.
+              name: http
+              # Alloy HTTP listen port.
+              containerPort: 12345
+          readinessProbe:
+            httpGet:
+              # Alloy readiness endpoint.
+              path: /-/ready
+              # Named port used for probe.
+              port: http
+            # Delay before first readiness probe.
+            initialDelaySeconds: 5
+            # Probe interval.
+            periodSeconds: 5
+            # Per-probe timeout.
+            timeoutSeconds: 3
+            # Consecutive failures before marking unready.
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              # Alloy liveness endpoint.
+              path: /-/healthy
+              # Named port used for probe.
+              port: http
+            # Delay before first liveness probe.
+            initialDelaySeconds: 20
+            # Probe interval.
+            periodSeconds: 10
+            # Per-probe timeout.
+            timeoutSeconds: 3
+            # Consecutive failures before restart.
+            failureThreshold: 6
+          resources:
+            requests:
+              # Guaranteed CPU reservation.
+              cpu: 50m
+              # Guaranteed memory reservation.
+              memory: 64Mi
+            limits:
+              # Max CPU usage allowed.
+              cpu: 500m
+              # Max memory usage allowed.
+              memory: 512Mi
+          volumeMounts:
+            - # Mount Alloy config from ConfigMap.
+              name: config
+              # Config directory expected by Alloy.
+              mountPath: /etc/alloy
+              # Config files should be read-only.
+              readOnly: true
+            - # Host logs directory mount for pod log files.
+              name: varlog
+              # Path on container side.
+              mountPath: /var/log
+              # Host logs are read-only for safety.
+              readOnly: true
+            - # Persistent-ish host directory for Alloy local state.
+              name: storage
+              # Path used by --storage.path.
+              mountPath: /var/lib/alloy/data
+      volumes:
+        - # Config volume with generated config.alloy.
+          name: config
+          configMap:
+            # ConfigMap name mounted into container.
+            name: task-queue-alloy-config
+        - # HostPath volume exposing node log files.
+          name: varlog
+          hostPath:
+            # Host directory containing pod/container logs.
+            path: /var/log
+            # Require existing directory.
+            type: Directory
+        - # HostPath volume for Alloy state between pod restarts on same node.
+          name: storage
+          hostPath:
+            # Host directory path used for Alloy storage.
+            path: /var/lib/task-queue-alloy
+            # Create directory if it does not exist.
+            type: DirectoryOrCreate

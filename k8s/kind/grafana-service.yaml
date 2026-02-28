@@ -1,0 +1,24 @@
+# Kubernetes API version for Service.
+apiVersion: v1
+# Resource kind exposing Grafana UI.
+kind: Service
+metadata:
+  # Service DNS name for Grafana.
+  name: task-queue-grafana
+  # Namespace where service is created.
+  namespace: task-queue
+spec:
+  # NodePort exposes Grafana to host in kind.
+  type: NodePort
+  # Select Grafana pod(s).
+  selector:
+    app: task-queue-grafana
+  ports:
+    # Logical HTTP port name.
+    - name: http
+      # Service port inside cluster.
+      port: 3000
+      # Destination named container port.
+      targetPort: http
+      # NodePort mapped to localhost:3000.
+      nodePort: 30030

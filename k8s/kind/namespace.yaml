@@ -1,0 +1,7 @@
+# Kubernetes API version for core Namespace object.
+apiVersion: v1
+# Resource kind: creates an isolated namespace.
+kind: Namespace
+metadata:
+  # Namespace name used by all local task-queue resources.
+  name: task-queue

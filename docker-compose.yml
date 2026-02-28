@@ -1,0 +1,131 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: task-queue-postgres
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
+      - -c
+      - pg_stat_statements.max=10000
+      - -c
+      - track_io_timing=on
+    environment:
+      POSTGRES_DB: task_queue
+      POSTGRES_USER: task_queue
+      POSTGRES_PASSWORD: task_queue
+    ports:
+      - "${POSTGRES_PORT:-54032}:5432"
+    volumes:
+      - ./monitoring/postgres/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U task_queue -d task_queue"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  postgres-init:
+    image: postgres:16-alpine
+    container_name: task-queue-postgres-init
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        psql "postgresql://task_queue:task_queue@postgres:5432/task_queue" \
+          -c "create extension if not exists pg_stat_statements;"
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.19.1
+    container_name: task-queue-postgres-exporter
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-init:
+        condition: service_completed_successfully
+    environment:
+      DATA_SOURCE_NAME: postgresql://task_queue:task_queue@postgres:5432/task_queue?sslmode=disable
+
+  sample-app:
+    build:
+      context: .
+      dockerfile: task-queue-sample-app/Dockerfile
+    container_name: task-queue-sample-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/task_queue
+      SPRING_DATASOURCE_USERNAME: task_queue
+      SPRING_DATASOURCE_PASSWORD: task_queue
+      TASK_QUEUE_RUNTIME_ENABLED: "true"
+      TASK_QUEUE_WORKER_COUNT: "2"
+    ports:
+      - "${APP_PORT:-8080}:8080"
+
+  prometheus:
+    image: prom/prometheus:v3.10.0
+    container_name: task-queue-prometheus
+    depends_on:
+      - sample-app
+      - postgres-exporter
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+
+  loki:
+    image: grafana/loki:3.6.7
+    container_name: task-queue-loki
+    command:
+      - "-config.file=/etc/loki/config.yml"
+    volumes:
+      - ./monitoring/loki/loki-config.yml:/etc/loki/config.yml:ro
+      - loki-data:/loki
+    ports:
+      - "${LOKI_PORT:-3100}:3100"
+
+  alloy:
+    image: grafana/alloy:v1.12.1
+    container_name: task-queue-alloy
+    depends_on:
+      - loki
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./monitoring/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy-data:/var/lib/alloy/data
+    ports:
+      - "${ALLOY_PORT:-12345}:12345"
+
+  grafana:
+    image: grafana/grafana:12.4.0
+    container_name: task-queue-grafana
+    depends_on:
+      - prometheus
+      - loki
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./monitoring/grafana/provisioning/datasources/datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
+      - ./monitoring/grafana/provisioning/dashboards/dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+
+volumes:
+  loki-data:
+  alloy-data:

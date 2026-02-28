@@ -1,0 +1,24 @@
+# Global scrape/evaluation defaults for all jobs.
+global:
+  # How often Prometheus scrapes targets.
+  scrape_interval: 5s
+  # How often Prometheus evaluates recording/alert rules.
+  evaluation_interval: 5s
+
+# List of scrape jobs.
+scrape_configs:
+  - # Job label attached to all metrics from sample app target(s).
+    job_name: task-queue-sample
+    # HTTP path where Spring Boot exposes Prometheus metrics.
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets:
+          # In-cluster DNS name and port of sample app service.
+          - task-queue-sample-app:8080
+
+  - # Job label for postgres-exporter metrics.
+    job_name: postgres
+    static_configs:
+      - targets:
+          # In-cluster DNS name and port of postgres-exporter service.
+          - task-queue-postgres-exporter:9187

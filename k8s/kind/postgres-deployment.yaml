@@ -1,0 +1,140 @@
+# Kubernetes API version for Deployment resource.
+apiVersion: apps/v1
+# Resource kind managing a replicated pod set.
+kind: Deployment
+metadata:
+  # Deployment name.
+  name: task-queue-postgres
+  # Namespace where deployment is created.
+  namespace: task-queue
+  labels:
+    # Common app label for selectors/services.
+    app: task-queue-postgres
+spec:
+  # Number of Postgres pod replicas.
+  replicas: 1
+  selector:
+    matchLabels:
+      # Deployment controls pods with this label.
+      app: task-queue-postgres
+  template:
+    metadata:
+      labels:
+        # Pod label used by service selector.
+        app: task-queue-postgres
+    spec:
+      containers:
+        - # Container name inside pod.
+          name: postgres
+          # Postgres image tag (v16 on Alpine).
+          image: postgres:16-alpine
+          # Do not pull if local image is already present.
+          imagePullPolicy: IfNotPresent
+          args:
+            # Entrypoint binary.
+            - postgres
+            # Pass PostgreSQL runtime flag.
+            - -c
+            # Preload extension library needed for pg_stat_statements.
+            - shared_preload_libraries=pg_stat_statements
+            - -c
+            # Track all SQL statement types in extension stats.
+            - pg_stat_statements.track=all
+            - -c
+            # Limit number of tracked normalized statements.
+            - pg_stat_statements.max=10000
+            - -c
+            # Enable IO timing metrics (helps monitoring).
+            - track_io_timing=on
+            - -c
+            # Raise max DB connections for multi-replica local tests.
+            - max_connections=200
+          ports:
+            - # Named port used by service targetPort.
+              name: postgres
+              # Container TCP port for PostgreSQL.
+              containerPort: 5432
+          env:
+            - # Postgres initial database name.
+              name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  # Secret containing DB credentials.
+                  name: task-queue-db
+                  # Secret key to read.
+                  key: POSTGRES_DB
+            - # Postgres superuser/application user.
+              name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: task-queue-db
+                  key: POSTGRES_USER
+            - # Password for POSTGRES_USER.
+              name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: task-queue-db
+                  key: POSTGRES_PASSWORD
+          volumeMounts:
+            - # Mount point for DB data directory.
+              name: postgres-data
+              # Default PostgreSQL data path.
+              mountPath: /var/lib/postgresql/data
+            - # Mount init SQL file from ConfigMap.
+              name: postgres-initdb
+              # Target path recognized by official postgres entrypoint.
+              mountPath: /docker-entrypoint-initdb.d/001-enable-pg-stat-statements.sql
+              # ConfigMap key mounted as single file.
+              subPath: 001-enable-pg-stat-statements.sql
+          readinessProbe:
+            exec:
+              command:
+                # Shell executable for running pg_isready command.
+                - sh
+                # Execute command string.
+                - -c
+                # Check whether DB accepts connections.
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+            # Delay before first readiness check.
+            initialDelaySeconds: 5
+            # Probe interval.
+            periodSeconds: 5
+            # Per-probe timeout.
+            timeoutSeconds: 3
+            # Consecutive failures before marking unready.
+            failureThreshold: 12
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                # Same check for restart decision.
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+            # Delay before first liveness check.
+            initialDelaySeconds: 20
+            # Liveness probe interval.
+            periodSeconds: 10
+            # Per-probe timeout.
+            timeoutSeconds: 3
+            # Consecutive failures before container restart.
+            failureThreshold: 6
+          resources:
+            requests:
+              # Guaranteed CPU reservation.
+              cpu: 100m
+              # Guaranteed memory reservation.
+              memory: 256Mi
+            limits:
+              # Max CPU usage allowed.
+              cpu: 500m
+              # Max memory usage allowed.
+              memory: 1Gi
+      volumes:
+        - # Ephemeral storage for Postgres data (reset on pod recreation).
+          name: postgres-data
+          emptyDir: {}
+        - # ConfigMap volume with init SQL scripts.
+          name: postgres-initdb
+          configMap:
+            # ConfigMap generated by kustomize.
+            name: task-queue-postgres-initdb

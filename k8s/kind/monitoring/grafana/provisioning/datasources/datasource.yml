@@ -1,0 +1,68 @@
+# nonk8s
+# Grafana provisioning file version.
+apiVersion: 1
+
+# Datasources to auto-create at startup.
+datasources:
+  - # Display name in Grafana UI.
+    name: Prometheus
+    # Stable unique ID used by dashboards.
+    uid: prometheus
+    # Datasource plugin type.
+    type: prometheus
+    # Access mode: Grafana server proxies requests.
+    access: proxy
+    # Base URL reachable from Grafana pod.
+    url: http://task-queue-prometheus:9090
+    # Mark as default datasource for new panels.
+    isDefault: true
+    # Prevent editing in UI to keep config declarative.
+    editable: false
+  - # Display name in Grafana UI.
+    name: Loki
+    # Stable unique ID used by dashboards.
+    uid: loki
+    # Datasource plugin type.
+    type: loki
+    # Access mode: Grafana server proxies requests.
+    access: proxy
+    # Base URL reachable from Grafana pod.
+    url: http://task-queue-loki:3100
+    # Not the default datasource.
+    isDefault: false
+    # Prevent editing in UI to keep config declarative.
+    editable: false
+  - # Display name in Grafana UI.
+    name: Postgres
+    # Stable unique ID used by dashboards.
+    uid: postgres
+    # Datasource plugin type.
+    type: postgres
+    # Access mode: Grafana server opens DB connection.
+    access: proxy
+    # Host:port for Postgres service from Grafana pod.
+    url: task-queue-postgres:5432
+    # DB user for connection.
+    user: task_queue
+    jsonData:
+      # Default database to use.
+      database: task_queue
+      # SSL mode for local non-TLS Postgres.
+      sslmode: disable
+      # PostgreSQL version hint (16.0 -> 1600).
+      postgresVersion: 1600
+      # TimescaleDB extension usage flag.
+      timescaledb: false
+      # Max number of open DB connections from Grafana.
+      maxOpenConns: 5
+      # Max idle DB connections kept in pool.
+      maxIdleConns: 2
+      # Connection max lifetime in seconds.
+      connMaxLifetime: 14400
+    secureJsonData:
+      # DB password stored as secure field.
+      password: task_queue
+    # Not the default datasource.
+    isDefault: false
+    # Prevent editing in UI to keep config declarative.
+    editable: false

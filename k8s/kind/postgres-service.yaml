@@ -1,0 +1,24 @@
+# Kubernetes API version for Service.
+apiVersion: v1
+# Resource kind exposing network access to pods.
+kind: Service
+metadata:
+  # Service DNS name used by in-cluster clients.
+  name: task-queue-postgres
+  # Namespace where service is created.
+  namespace: task-queue
+spec:
+  # NodePort exposes service on each node IP and fixed port.
+  type: NodePort
+  # Select pods with this label as service backends.
+  selector:
+    app: task-queue-postgres
+  ports:
+    # Logical port entry name (can be used by targetPort reference).
+    - name: postgres
+      # Service port available inside cluster.
+      port: 5432
+      # Destination container port name on selected pods.
+      targetPort: postgres
+      # Fixed node port used by kind host mapping.
+      nodePort: 30432

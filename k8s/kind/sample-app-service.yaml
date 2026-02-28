@@ -1,0 +1,24 @@
+# Kubernetes API version for Service.
+apiVersion: v1
+# Resource kind exposing sample app HTTP endpoint.
+kind: Service
+metadata:
+  # Service name used by clients and tests.
+  name: task-queue-sample-app
+  # Namespace where service is created.
+  namespace: task-queue
+spec:
+  # NodePort exposes app externally through kind node port mapping.
+  type: NodePort
+  # Select sample-app pods by label.
+  selector:
+    app: task-queue-sample-app
+  ports:
+    # Logical HTTP port name.
+    - name: http
+      # Cluster-internal service port.
+      port: 8080
+      # Destination named container port.
+      targetPort: http
+      # Fixed node port mapped to localhost:8080 in kind config.
+      nodePort: 30080

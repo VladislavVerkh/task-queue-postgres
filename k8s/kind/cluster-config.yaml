@@ -1,0 +1,35 @@
+# nonk8s
+# Kind object type (defines a local Kubernetes cluster).
+kind: Cluster
+# Kind config API version.
+apiVersion: kind.x-k8s.io/v1alpha4
+# Cluster node topology.
+nodes:
+  # Single control-plane node runs API server/control components.
+  - role: control-plane
+    # Host-to-node port forwarding so local machine can access NodePort services.
+    extraPortMappings:
+      # Map sample app NodePort (30080 inside kind node) to localhost:8080.
+      - containerPort: 30080
+        # Port on local host machine.
+        hostPort: 8080
+        # Network protocol for mapping.
+        protocol: TCP
+      # Map Postgres NodePort to localhost:54032.
+      - containerPort: 30432
+        hostPort: 54032
+        protocol: TCP
+      # Map Prometheus NodePort to localhost:9090.
+      - containerPort: 30090
+        hostPort: 9090
+        protocol: TCP
+      # Map Grafana NodePort to localhost:3000.
+      - containerPort: 30030
+        hostPort: 3000
+        protocol: TCP
+  # Worker node 1 for app replicas and distribution tests.
+  - role: worker
+  # Worker node 2.
+  - role: worker
+  # Worker node 3.
+  - role: worker

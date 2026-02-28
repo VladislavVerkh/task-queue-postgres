@@ -1,0 +1,24 @@
+# Kubernetes API version for Service.
+apiVersion: v1
+# Resource kind exposing Prometheus UI/API.
+kind: Service
+metadata:
+  # Service DNS name for Prometheus.
+  name: task-queue-prometheus
+  # Namespace where service is created.
+  namespace: task-queue
+spec:
+  # NodePort is used for host access in local kind setup.
+  type: NodePort
+  # Select Prometheus pod(s).
+  selector:
+    app: task-queue-prometheus
+  ports:
+    # Logical HTTP port name.
+    - name: http
+      # Service port inside cluster.
+      port: 9090
+      # Destination container port name.
+      targetPort: http
+      # NodePort mapped to localhost:9090.
+      nodePort: 30090

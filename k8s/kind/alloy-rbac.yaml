@@ -1,0 +1,58 @@
+# Kubernetes API version for ServiceAccount.
+apiVersion: v1
+# Identity resource used by Alloy pods.
+kind: ServiceAccount
+metadata:
+  # ServiceAccount name referenced by DaemonSet.
+  name: task-queue-alloy
+  # Namespace where ServiceAccount exists.
+  namespace: task-queue
+---
+# Kubernetes API version for RBAC cluster-scoped resources.
+apiVersion: rbac.authorization.k8s.io/v1
+# Role describing permissions across the whole cluster.
+kind: ClusterRole
+metadata:
+  # ClusterRole name referenced by ClusterRoleBinding.
+  name: task-queue-alloy
+rules:
+  - # API group "" means core Kubernetes resources.
+    apiGroups: [""]
+    resources:
+      # Allow reading pod metadata for discovery.
+      - pods
+      # Allow reading node metadata (needed for labels/node names).
+      - nodes
+      # Allow reading namespace metadata.
+      - namespaces
+      # Allow reading service metadata.
+      - services
+    verbs:
+      # Read a single resource.
+      - get
+      # List resources.
+      - list
+      # Watch for changes in real time.
+      - watch
+---
+# Kubernetes API version for RBAC bindings.
+apiVersion: rbac.authorization.k8s.io/v1
+# Binding that grants ClusterRole to a subject.
+kind: ClusterRoleBinding
+metadata:
+  # Binding name.
+  name: task-queue-alloy
+subjects:
+  - # Subject type receiving permissions.
+    kind: ServiceAccount
+    # Subject name.
+    name: task-queue-alloy
+    # Subject namespace.
+    namespace: task-queue
+roleRef:
+  # API group of referenced role.
+  apiGroup: rbac.authorization.k8s.io
+  # Referenced role kind.
+  kind: ClusterRole
+  # Referenced role name.
+  name: task-queue-alloy
