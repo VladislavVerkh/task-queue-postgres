@@ -262,6 +262,8 @@ public class QueueWorkerRuntime {
 
   /** Периодически очищает "мертвые" воркеры и инициирует ребаланс при необходимости. */
   private void cleanupLoop() {
+    long reconcileIntervalNanos = Math.max(1L, properties.getHandoffReconcileInterval().toNanos());
+    long nextReconcileAt = System.nanoTime();
     while (running.get() && !Thread.currentThread().isInterrupted()) {
       try {
         int cleaned = workerCoordinationService.cleanUpDeadWorkers();
@@ -270,6 +272,16 @@ public class QueueWorkerRuntime {
         }
       } catch (RuntimeException e) {
         log.error("Dead worker cleanup failed", e);
+      }
+
+      long nowNanos = System.nanoTime();
+      if (nowNanos >= nextReconcileAt) {
+        try {
+          workerCoordinationService.reconcileHandoffs();
+        } catch (RuntimeException e) {
+          log.error("Handoff reconcile failed", e);
+        }
+        nextReconcileAt = nowNanos + reconcileIntervalNanos;
       }
       sleep(properties.getCleanupInterval());
     }

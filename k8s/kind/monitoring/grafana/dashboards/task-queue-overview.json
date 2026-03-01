@@ -438,6 +438,220 @@
       ],
       "title": "Rebalance Latency",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.1
+              }
+            ]
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "id": 7,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(task_queue_process_handoff_started_total[1m])",
+          "legendFormat": "handoff started",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(task_queue_process_handoff_completed_total[1m])",
+          "legendFormat": "handoff completed",
+          "refId": "B"
+        },
+        {
+          "expr": "rate(task_queue_process_handoff_cancelled_total[1m])",
+          "legendFormat": "handoff cancelled",
+          "refId": "C"
+        },
+        {
+          "expr": "rate(task_queue_process_handoff_timeout_total[1m])",
+          "legendFormat": "handoff timeout",
+          "refId": "D"
+        },
+        {
+          "expr": "rate(task_queue_process_handoff_timeout_extended_total[1m])",
+          "legendFormat": "timeout extend",
+          "refId": "E"
+        },
+        {
+          "expr": "rate(task_queue_process_handoff_timeout_aborted_total[1m])",
+          "legendFormat": "timeout abort",
+          "refId": "F"
+        },
+        {
+          "expr": "rate(task_queue_process_handoff_timeout_forced_total[1m])",
+          "legendFormat": "timeout force",
+          "refId": "G"
+        }
+      ],
+      "title": "Handoff Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "id": 8,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(task_queue_process_handoff_duration_seconds_sum[5m]) / rate(task_queue_process_handoff_duration_seconds_count[5m])",
+          "legendFormat": "handoff avg duration",
+          "refId": "A"
+        },
+        {
+          "expr": "task_queue_process_handoff_duration_seconds_max",
+          "legendFormat": "handoff max duration",
+          "refId": "B"
+        }
+      ],
+      "title": "Handoff Duration",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 32
+      },
+      "id": 9,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "task_queue_process_handoff_draining_partitions",
+          "legendFormat": "draining partitions",
+          "refId": "A"
+        }
+      ],
+      "title": "Draining Partitions",
+      "type": "timeseries"
     }
   ],
   "refresh": "5s",
@@ -459,6 +673,6 @@
   "timezone": "",
   "title": "Task Queue Overview",
   "uid": "task-queue-overview",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }

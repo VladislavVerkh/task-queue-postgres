@@ -86,6 +86,16 @@ public class TaskQueueProperties {
   private TaskHandlingTransactionMode handlingTransactionMode =
       TaskHandlingTransactionMode.TRANSACTIONAL;
 
+  @NotNull
+  @DurationMin(millis = 1)
+  private Duration handoffDrainTimeout = Duration.ofSeconds(30);
+
+  @NotNull
+  @DurationMin(millis = 1)
+  private Duration handoffReconcileInterval = Duration.ofSeconds(1);
+
+  @NotNull private HandoffTimeoutAction handoffTimeoutAction = HandoffTimeoutAction.EXTEND;
+
   private long rebalanceLockKey = 584_231_947_015L;
 
   /**

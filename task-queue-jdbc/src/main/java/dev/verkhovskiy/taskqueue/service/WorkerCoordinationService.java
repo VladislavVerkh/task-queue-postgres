@@ -6,7 +6,9 @@ import dev.verkhovskiy.taskqueue.metrics.TaskQueueMetrics;
 import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository;
 import dev.verkhovskiy.taskqueue.persistence.WorkerRegistryRepository;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import lombok.RequiredArgsConstructor;
@@ -105,6 +107,12 @@ public class WorkerCoordinationService {
     rebalanceInternal();
   }
 
+  /** Синхронизирует застрявшие DRAINING-assignments без изменения состава воркеров. */
+  @Transactional(transactionManager = TaskQueueBeanNames.TRANSACTION_MANAGER)
+  public void reconcileHandoffs() {
+    rebalanceInternal();
+  }
+
   /**
    * Выполняет ребаланс в защищенной секции под advisory-блокировкой.
    *
@@ -122,20 +130,18 @@ public class WorkerCoordinationService {
             List<String> workerIds = workerRegistryRepository.findAllWorkerIdsOrdered();
             if (workerIds.isEmpty()) {
               workerRegistryRepository.clearAssignments();
+              metrics.setDrainingAssignments(0);
               return null;
             }
 
-            Map<Integer, String> currentAssignments =
-                workerRegistryRepository.findCurrentPartitionAssignments(
-                    properties.getPartitionCount());
+            Map<Integer, WorkerRegistryRepository.PartitionAssignment> currentAssignments =
+                workerRegistryRepository.findPartitionAssignments(properties.getPartitionCount());
+            Map<Integer, String> currentOwners = currentOwners(currentAssignments);
             Map<Integer, String> assignmentPlan =
-                assignmentPlanner.plan(
-                    workerIds, properties.getPartitionCount(), currentAssignments);
-            Instant ownerChangedAt = clock.instant();
-            assignmentPlan.forEach(
-                (partitionNum, workerId) ->
-                    workerRegistryRepository.upsertPartitionAssignment(
-                        partitionNum, workerId, ownerChangedAt));
+                assignmentPlanner.plan(workerIds, properties.getPartitionCount(), currentOwners);
+            Instant now = clock.instant();
+            applyAssignmentPlan(assignmentPlan, currentAssignments, now);
+            metrics.setDrainingAssignments(workerRegistryRepository.countDrainingAssignments());
             return null;
           });
     } catch (RuntimeException e) {
@@ -145,5 +151,108 @@ public class WorkerCoordinationService {
       metrics.rebalanceFailure();
       throw new IllegalStateException("Unexpected rebalance failure", e);
     }
+  }
+
+  private void applyAssignmentPlan(
+      Map<Integer, String> assignmentPlan,
+      Map<Integer, WorkerRegistryRepository.PartitionAssignment> currentAssignments,
+      Instant now) {
+    assignmentPlan.forEach(
+        (partitionNum, targetWorkerId) -> {
+          WorkerRegistryRepository.PartitionAssignment current =
+              currentAssignments.get(partitionNum);
+          if (current == null) {
+            workerRegistryRepository.upsertActiveAssignment(partitionNum, targetWorkerId, now);
+            return;
+          }
+
+          if (!current.draining()) {
+            handleActiveAssignment(partitionNum, targetWorkerId, current, now);
+            return;
+          }
+
+          handleDrainingAssignment(partitionNum, targetWorkerId, current, now);
+        });
+  }
+
+  private void handleActiveAssignment(
+      int partitionNum,
+      String targetWorkerId,
+      WorkerRegistryRepository.PartitionAssignment current,
+      Instant now) {
+    if (current.workerId().equals(targetWorkerId)) {
+      return;
+    }
+
+    if (!queueRepository.hasInFlightTasks(partitionNum, current.workerId())) {
+      workerRegistryRepository.upsertActiveAssignment(partitionNum, targetWorkerId, now);
+      return;
+    }
+
+    Instant deadline = now.plus(properties.getHandoffDrainTimeout());
+    workerRegistryRepository.startDraining(partitionNum, targetWorkerId, now, deadline);
+    metrics.handoffStarted();
+  }
+
+  private void handleDrainingAssignment(
+      int partitionNum,
+      String targetWorkerId,
+      WorkerRegistryRepository.PartitionAssignment current,
+      Instant now) {
+    if (current.workerId().equals(targetWorkerId)) {
+      workerRegistryRepository.cancelDraining(partitionNum);
+      metrics.handoffCancelled(handoffDuration(current.drainStartedAt(), now));
+      return;
+    }
+
+    if (!targetWorkerId.equals(current.pendingWorkerId())) {
+      workerRegistryRepository.updatePendingWorker(partitionNum, targetWorkerId);
+    }
+
+    if (!queueRepository.hasInFlightTasks(partitionNum, current.workerId())) {
+      workerRegistryRepository.completeHandoff(partitionNum, targetWorkerId, now);
+      metrics.handoffCompleted(handoffDuration(current.drainStartedAt(), now));
+      return;
+    }
+
+    if (!drainDeadlineReached(current.drainDeadlineAt(), now)) {
+      return;
+    }
+
+    metrics.handoffTimeout();
+    switch (properties.getHandoffTimeoutAction()) {
+      case EXTEND -> {
+        Instant newDeadline = now.plus(properties.getHandoffDrainTimeout());
+        workerRegistryRepository.extendDrainDeadline(partitionNum, newDeadline);
+        metrics.handoffTimeoutExtended();
+      }
+      case ABORT -> {
+        workerRegistryRepository.cancelDraining(partitionNum);
+        metrics.handoffTimeoutAborted(handoffDuration(current.drainStartedAt(), now));
+      }
+      case FORCE -> {
+        workerRegistryRepository.completeHandoff(partitionNum, targetWorkerId, now);
+        metrics.handoffTimeoutForced(handoffDuration(current.drainStartedAt(), now));
+      }
+    }
+  }
+
+  private static Map<Integer, String> currentOwners(
+      Map<Integer, WorkerRegistryRepository.PartitionAssignment> currentAssignments) {
+    Map<Integer, String> owners = new LinkedHashMap<>(currentAssignments.size());
+    currentAssignments.forEach(
+        (partitionNum, assignment) -> owners.put(partitionNum, assignment.workerId()));
+    return owners;
+  }
+
+  private static boolean drainDeadlineReached(Instant deadlineAt, Instant now) {
+    return deadlineAt == null || !now.isBefore(deadlineAt);
+  }
+
+  private static Duration handoffDuration(Instant startedAt, Instant endedAt) {
+    if (startedAt == null || endedAt.isBefore(startedAt)) {
+      return Duration.ZERO;
+    }
+    return Duration.between(startedAt, endedAt);
   }
 }

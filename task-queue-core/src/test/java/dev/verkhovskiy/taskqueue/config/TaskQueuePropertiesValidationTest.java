@@ -56,6 +56,29 @@ class TaskQueuePropertiesValidationTest {
     assertEquals("retryDelayRangeValid", violations.iterator().next().getPropertyPath().toString());
   }
 
+  @Test
+  void rejectsNonPositiveHandoffDrainTimeout() {
+    TaskQueueProperties properties = new TaskQueueProperties();
+    properties.setHandoffDrainTimeout(Duration.ZERO);
+
+    Set<ConstraintViolation<TaskQueueProperties>> violations = validate(properties);
+
+    assertEquals(1, violations.size());
+    assertEquals("handoffDrainTimeout", violations.iterator().next().getPropertyPath().toString());
+  }
+
+  @Test
+  void rejectsNonPositiveHandoffReconcileInterval() {
+    TaskQueueProperties properties = new TaskQueueProperties();
+    properties.setHandoffReconcileInterval(Duration.ZERO);
+
+    Set<ConstraintViolation<TaskQueueProperties>> violations = validate(properties);
+
+    assertEquals(1, violations.size());
+    assertEquals(
+        "handoffReconcileInterval", violations.iterator().next().getPropertyPath().toString());
+  }
+
   private static Set<ConstraintViolation<TaskQueueProperties>> validate(
       TaskQueueProperties properties) {
     try (var validatorFactory = Validation.buildDefaultValidatorFactory()) {

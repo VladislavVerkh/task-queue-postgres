@@ -99,9 +99,10 @@ public class TaskQueueRepository {
         """
             with candidate as (
                 select q.task_id
-                  from task_worker_partition_assignment a
+                 from task_worker_partition_assignment a
                   join task_queue q on q.partition_num = a.partition_num
                  where a.worker_id = :workerId
+                   and a.handoff_state = 'ACTIVE'
                    and q.available_at <= :now
                    and q.worker_id is null
                  order by q.available_at, q.created_at, q.task_id
@@ -175,6 +176,31 @@ public class TaskQueueRepository {
                  where worker_id = :workerId
                 """,
         new MapSqlParameterSource("workerId", workerId));
+  }
+
+  /**
+   * Проверяет наличие in-flight задач конкретной партиции у текущего владельца.
+   *
+   * @param partitionNum номер партиции
+   * @param workerId идентификатор текущего владельца
+   * @return {@code true}, если есть хотя бы одна захваченная задача
+   */
+  public boolean hasInFlightTasks(int partitionNum, String workerId) {
+    Boolean exists =
+        jdbc.queryForObject(
+            """
+            select exists(
+                select 1
+                  from task_queue
+                 where partition_num = :partitionNum
+                   and worker_id = :workerId
+            )
+            """,
+            new MapSqlParameterSource()
+                .addValue("partitionNum", partitionNum)
+                .addValue("workerId", workerId),
+            Boolean.class);
+    return Boolean.TRUE.equals(exists);
   }
 
   /**

@@ -147,62 +147,198 @@ public class WorkerRegistryRepository {
   }
 
   /**
-   * Загружает текущее закрепление партиций по воркерам.
+   * Загружает текущее закрепление партиций, включая состояние handoff.
    *
    * @param maxPartitionNum верхняя граница номера партиции
-   * @return отображение {@code partitionNum -> workerId}
+   * @return отображение {@code partitionNum -> assignment}
    */
-  public Map<Integer, String> findCurrentPartitionAssignments(int maxPartitionNum) {
+  public Map<Integer, PartitionAssignment> findPartitionAssignments(int maxPartitionNum) {
     return jdbc.query(
         """
-            select partition_num, worker_id
+            select partition_num,
+                   worker_id,
+                   handoff_state,
+                   pending_worker_id,
+                   drain_started_at,
+                   drain_deadline_at
               from task_worker_partition_assignment
              where partition_num <= :maxPartitionNum
              order by partition_num
             """,
         new MapSqlParameterSource("maxPartitionNum", maxPartitionNum),
         rs -> {
-          Map<Integer, String> result = new LinkedHashMap<>();
+          Map<Integer, PartitionAssignment> result = new LinkedHashMap<>();
           while (rs.next()) {
-            result.put(rs.getInt("partition_num"), rs.getString("worker_id"));
+            int partitionNum = rs.getInt("partition_num");
+            result.put(
+                partitionNum,
+                new PartitionAssignment(
+                    partitionNum,
+                    rs.getString("worker_id"),
+                    HandoffState.fromDbValue(rs.getString("handoff_state")),
+                    rs.getString("pending_worker_id"),
+                    toInstant(rs.getObject("drain_started_at", OffsetDateTime.class)),
+                    toInstant(rs.getObject("drain_deadline_at", OffsetDateTime.class))));
           }
           return result;
         });
   }
 
   /**
-   * Создает или обновляет закрепление партиции за воркером.
+   * Создает или переводит assignment в ACTIVE с указанным владельцем.
    *
-   * @param partitionNum номер партиции
-   * @param workerId идентификатор воркера
-   * @param ownerChangedAt момент смены владельца
+   * <p>Если владелец меняется, увеличивает owner_change_count и обновляет owner_changed_at.
    */
-  public void upsertPartitionAssignment(int partitionNum, String workerId, Instant ownerChangedAt) {
+  public void upsertActiveAssignment(int partitionNum, String workerId, Instant ownerChangedAt) {
     jdbc.update(
         """
             insert into task_worker_partition_assignment(
                 partition_num,
                 worker_id,
+                handoff_state,
+                pending_worker_id,
+                drain_started_at,
+                drain_deadline_at,
                 owner_changed_at,
                 owner_change_count
             )
             values(
                 :partitionNum,
                 :workerId,
+                'ACTIVE',
+                null,
+                null,
+                null,
                 :ownerChangedAt,
                 1
             )
             on conflict (partition_num)
             do update
                   set worker_id = excluded.worker_id,
-                      owner_changed_at = :ownerChangedAt,
-                      owner_change_count = task_worker_partition_assignment.owner_change_count + 1
-                where task_worker_partition_assignment.worker_id is distinct from excluded.worker_id
+                      handoff_state = 'ACTIVE',
+                      pending_worker_id = null,
+                      drain_started_at = null,
+                      drain_deadline_at = null,
+                      owner_changed_at =
+                          case
+                              when task_worker_partition_assignment.worker_id is distinct from excluded.worker_id
+                              then :ownerChangedAt
+                              else task_worker_partition_assignment.owner_changed_at
+                          end,
+                      owner_change_count =
+                          case
+                              when task_worker_partition_assignment.worker_id is distinct from excluded.worker_id
+                              then task_worker_partition_assignment.owner_change_count + 1
+                              else task_worker_partition_assignment.owner_change_count
+                          end
             """,
         new MapSqlParameterSource()
             .addValue("partitionNum", partitionNum)
             .addValue("workerId", workerId)
             .addValue("ownerChangedAt", toOffsetDateTime(ownerChangedAt)));
+  }
+
+  /** Переводит assignment партиции в состояние DRAINING. */
+  public void startDraining(
+      int partitionNum, String pendingWorkerId, Instant startedAt, Instant deadlineAt) {
+    jdbc.update(
+        """
+            update task_worker_partition_assignment
+               set handoff_state = 'DRAINING',
+                   pending_worker_id = :pendingWorkerId,
+                   drain_started_at = :startedAt,
+                   drain_deadline_at = :deadlineAt
+             where partition_num = :partitionNum
+            """,
+        new MapSqlParameterSource()
+            .addValue("partitionNum", partitionNum)
+            .addValue("pendingWorkerId", pendingWorkerId)
+            .addValue("startedAt", toOffsetDateTime(startedAt))
+            .addValue("deadlineAt", toOffsetDateTime(deadlineAt)));
+  }
+
+  /** Обновляет pending-owner для уже начатого дренажа. */
+  public void updatePendingWorker(int partitionNum, String pendingWorkerId) {
+    jdbc.update(
+        """
+            update task_worker_partition_assignment
+               set pending_worker_id = :pendingWorkerId
+             where partition_num = :partitionNum
+            """,
+        new MapSqlParameterSource()
+            .addValue("partitionNum", partitionNum)
+            .addValue("pendingWorkerId", pendingWorkerId));
+  }
+
+  /** Продлевает дедлайн дренажа для партиции. */
+  public void extendDrainDeadline(int partitionNum, Instant deadlineAt) {
+    jdbc.update(
+        """
+            update task_worker_partition_assignment
+               set drain_deadline_at = :deadlineAt
+             where partition_num = :partitionNum
+            """,
+        new MapSqlParameterSource()
+            .addValue("partitionNum", partitionNum)
+            .addValue("deadlineAt", toOffsetDateTime(deadlineAt)));
+  }
+
+  /** Отменяет handoff и возвращает assignment в ACTIVE у текущего владельца. */
+  public void cancelDraining(int partitionNum) {
+    jdbc.update(
+        """
+            update task_worker_partition_assignment
+               set handoff_state = 'ACTIVE',
+                   pending_worker_id = null,
+                   drain_started_at = null,
+                   drain_deadline_at = null
+             where partition_num = :partitionNum
+            """,
+        new MapSqlParameterSource("partitionNum", partitionNum));
+  }
+
+  /** Завершает handoff партиции на нового владельца. */
+  public void completeHandoff(int partitionNum, String newWorkerId, Instant ownerChangedAt) {
+    jdbc.update(
+        """
+            update task_worker_partition_assignment
+               set worker_id = :newWorkerId,
+                   handoff_state = 'ACTIVE',
+                   pending_worker_id = null,
+                   drain_started_at = null,
+                   drain_deadline_at = null,
+                   owner_changed_at =
+                       case
+                           when worker_id is distinct from :newWorkerId
+                           then :ownerChangedAt
+                           else owner_changed_at
+                       end,
+                   owner_change_count =
+                       case
+                           when worker_id is distinct from :newWorkerId
+                           then owner_change_count + 1
+                           else owner_change_count
+                       end
+             where partition_num = :partitionNum
+            """,
+        new MapSqlParameterSource()
+            .addValue("partitionNum", partitionNum)
+            .addValue("newWorkerId", newWorkerId)
+            .addValue("ownerChangedAt", toOffsetDateTime(ownerChangedAt)));
+  }
+
+  /** Возвращает количество партиций в состоянии DRAINING. */
+  public int countDrainingAssignments() {
+    Integer count =
+        jdbc.queryForObject(
+            """
+            select count(*)
+              from task_worker_partition_assignment
+             where handoff_state = 'DRAINING'
+            """,
+            new MapSqlParameterSource(),
+            Integer.class);
+    return count == null ? 0 : count;
   }
 
   /**
@@ -241,5 +377,45 @@ public class WorkerRegistryRepository {
    */
   private static OffsetDateTime toOffsetDateTime(Instant instant) {
     return OffsetDateTime.ofInstant(instant, ZoneOffset.UTC);
+  }
+
+  private static Instant toInstant(OffsetDateTime value) {
+    return value == null ? null : value.toInstant();
+  }
+
+  /** Состояние handoff закрепления партиции. */
+  public enum HandoffState {
+    ACTIVE,
+    DRAINING;
+
+    static HandoffState fromDbValue(String value) {
+      return HandoffState.valueOf(value);
+    }
+  }
+
+  /**
+   * Снимок текущего assignment партиции.
+   *
+   * @param partitionNum номер партиции
+   * @param workerId текущий владелец
+   * @param handoffState состояние handoff
+   * @param pendingWorkerId ожидающий владелец при DRAINING
+   * @param drainStartedAt время старта дренажа
+   * @param drainDeadlineAt дедлайн дренажа
+   */
+  public record PartitionAssignment(
+      int partitionNum,
+      String workerId,
+      HandoffState handoffState,
+      String pendingWorkerId,
+      Instant drainStartedAt,
+      Instant drainDeadlineAt) {
+
+    /**
+     * @return {@code true}, если партиция находится в DRAINING.
+     */
+    public boolean draining() {
+      return handoffState == HandoffState.DRAINING;
+    }
   }
 }
