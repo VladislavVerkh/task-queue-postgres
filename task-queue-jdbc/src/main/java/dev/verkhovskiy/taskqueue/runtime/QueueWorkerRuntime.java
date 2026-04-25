@@ -11,11 +11,11 @@ import dev.verkhovskiy.taskqueue.handler.TaskHandler;
 import dev.verkhovskiy.taskqueue.handler.TaskHandlerRegistry;
 import dev.verkhovskiy.taskqueue.metrics.TaskQueueMetrics;
 import dev.verkhovskiy.taskqueue.retry.RetryBackoffDecision;
+import dev.verkhovskiy.taskqueue.service.TaskDeadLetterService;
 import dev.verkhovskiy.taskqueue.service.TaskExecutionService;
 import dev.verkhovskiy.taskqueue.service.TaskQueueService;
 import dev.verkhovskiy.taskqueue.service.TaskRetryService;
 import dev.verkhovskiy.taskqueue.service.WorkerCoordinationService;
-import jakarta.annotation.PreDestroy;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.time.Duration;
@@ -34,8 +34,7 @@ import java.util.stream.IntStream;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.boot.context.event.ApplicationReadyEvent;
-import org.springframework.context.event.EventListener;
+import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
 
 /**
@@ -52,16 +51,20 @@ import org.springframework.stereotype.Component;
     name = "runtime-enabled",
     havingValue = "true",
     matchIfMissing = true)
-public class QueueWorkerRuntime {
+public class QueueWorkerRuntime implements SmartLifecycle {
 
   private static final AtomicInteger THREAD_COUNTER = new AtomicInteger(0);
+  private static final int PHASE = Integer.MAX_VALUE;
   private static final int HEARTBEAT_TIMEOUT_EXIT_CODE = 220;
   private static final int PROCESS_UNREGISTERED_EXIT_CODE = 230;
+  private static final int TASK_STATE_UPDATE_FAILED_EXIT_CODE = 240;
+  private static final int RUNTIME_TASK_FAILED_EXIT_CODE = 250;
 
   private final TaskQueueProperties properties;
   private final WorkerCoordinationService workerCoordinationService;
   private final TaskQueueService queueService;
   private final TaskRetryService retryService;
+  private final TaskDeadLetterService deadLetterService;
   private final TaskHandlerRegistry handlerRegistry;
   private final TaskExecutionService taskExecutionService;
   private final TaskQueueMetrics metrics;
@@ -74,8 +77,8 @@ public class QueueWorkerRuntime {
   private ExecutorService workerExecutor;
   private ExecutorService heartbeatExecutor;
 
-  /** Запускает фоновые циклы обработки и heartbeat после старта приложения. */
-  @EventListener(ApplicationReadyEvent.class)
+  /** Запускает фоновые циклы обработки и heartbeat при старте lifecycle. */
+  @Override
   public void start() {
     if (!running.compareAndSet(false, true)) {
       return;
@@ -104,12 +107,18 @@ public class QueueWorkerRuntime {
 
     IntStream.range(0, properties.getWorkerCount())
         .forEach(
-            workerIndex -> runtimeTasks.add(workerExecutor.submit(() -> workerLoop(workerIndex))));
-    runtimeTasks.add(workerExecutor.submit(this::cleanupLoop));
+            workerIndex ->
+                runtimeTasks.add(
+                    workerExecutor.submit(
+                        () ->
+                            runGuardedRuntimeTask(
+                                "worker-" + workerIndex, () -> workerLoop(workerIndex)))));
+    runtimeTasks.add(
+        workerExecutor.submit(() -> runGuardedRuntimeTask("cleanup", this::cleanupLoop)));
   }
 
-  /** Останавливает все фоновые executors при завершении приложения. */
-  @PreDestroy
+  /** Останавливает все фоновые executors при остановке lifecycle. */
+  @Override
   public void stop() {
     if (!running.compareAndSet(true, false)) {
       return;
@@ -117,20 +126,64 @@ public class QueueWorkerRuntime {
     if (workerExecutor == null) {
       return;
     }
-    workerExecutor.shutdownNow();
-    if (heartbeatExecutor != null) {
-      heartbeatExecutor.shutdownNow();
-    }
+    workerExecutor.shutdown();
     try {
-      if (!workerExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
-        log.warn("Task worker runtime was not stopped gracefully within timeout");
+      long shutdownTimeoutMillis = Math.max(1L, properties.getShutdownTimeout().toMillis());
+      if (!workerExecutor.awaitTermination(shutdownTimeoutMillis, TimeUnit.MILLISECONDS)) {
+        log.warn(
+            "Task worker runtime was not stopped gracefully within {} ms", shutdownTimeoutMillis);
+        workerExecutor.shutdownNow();
+        if (!workerExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+          log.warn("Task worker runtime was not stopped after forced interrupt");
+        }
       }
-      if (heartbeatExecutor != null && !heartbeatExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
-        log.warn("Task heartbeat executor was not stopped gracefully within timeout");
+      if (heartbeatExecutor != null) {
+        heartbeatExecutor.shutdownNow();
+        if (!heartbeatExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+          log.warn("Task heartbeat executor was not stopped gracefully within timeout");
+        }
       }
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
+      workerExecutor.shutdownNow();
+      if (heartbeatExecutor != null) {
+        heartbeatExecutor.shutdownNow();
+      }
     }
+  }
+
+  /**
+   * Останавливает runtime и уведомляет контейнер о завершении остановки.
+   *
+   * @param callback callback завершения stop-фазы
+   */
+  @Override
+  public void stop(Runnable callback) {
+    try {
+      stop();
+    } finally {
+      callback.run();
+    }
+  }
+
+  /**
+   * Возвращает фазу lifecycle: runtime стартует поздно и останавливается рано.
+   *
+   * @return максимальная фаза lifecycle
+   */
+  @Override
+  public int getPhase() {
+    return PHASE;
+  }
+
+  /**
+   * Возвращает текущее состояние runtime.
+   *
+   * @return {@code true}, если runtime запущен
+   */
+  @Override
+  public boolean isRunning() {
+    return running.get();
   }
 
   /**
@@ -198,6 +251,9 @@ public class QueueWorkerRuntime {
    * @param task задача из очереди
    */
   private void processTask(String workerId, QueuedTask task) {
+    TaskLeaseMonitor taskLeaseMonitor =
+        new TaskLeaseMonitor(workerId, task.taskId(), Thread.currentThread());
+    taskLeaseMonitor.start();
     try {
       if (properties.getHandlingTransactionMode() == TaskHandlingTransactionMode.TRANSACTIONAL) {
         taskExecutionService.handleAndAcknowledge(task, workerId);
@@ -219,7 +275,13 @@ public class QueueWorkerRuntime {
             workerId);
       } catch (RuntimeException retryError) {
         log.error("Failed to schedule retry for task {}", task.taskId(), retryError);
+        destroyApplication(
+            TASK_STATE_UPDATE_FAILED_EXIT_CODE,
+            "Stopping application because task state update failed, taskId=" + task.taskId(),
+            retryError);
       }
+    } finally {
+      taskLeaseMonitor.stop();
     }
   }
 
@@ -277,8 +339,28 @@ public class QueueWorkerRuntime {
   /** Периодически очищает "мертвые" воркеры и инициирует ребаланс при необходимости. */
   private void cleanupLoop() {
     long reconcileIntervalNanos = Math.max(1L, properties.getHandoffReconcileInterval().toNanos());
+    long queueMetricsIntervalNanos = Math.max(1L, properties.getQueueMetricsInterval().toNanos());
     long nextReconcileAt = System.nanoTime();
+    long nextQueueMetricsAt = System.nanoTime();
     while (running.get() && !Thread.currentThread().isInterrupted()) {
+      try {
+        int released = workerCoordinationService.cleanUpExpiredTaskLeases();
+        if (released > 0) {
+          log.warn("Released {} expired task leases", released);
+        }
+      } catch (RuntimeException e) {
+        log.error("Expired task lease cleanup failed", e);
+      }
+
+      try {
+        int deleted = deadLetterService.deleteExpired();
+        if (deleted > 0) {
+          log.info("Deleted {} expired dead-letter tasks", deleted);
+        }
+      } catch (RuntimeException e) {
+        log.error("Dead-letter retention cleanup failed", e);
+      }
+
       try {
         int cleaned = workerCoordinationService.cleanUpDeadWorkers();
         if (cleaned > 0) {
@@ -297,8 +379,41 @@ public class QueueWorkerRuntime {
         }
         nextReconcileAt = nowNanos + reconcileIntervalNanos;
       }
+
+      if (nowNanos >= nextQueueMetricsAt) {
+        try {
+          workerCoordinationService.refreshQueueStateMetrics();
+        } catch (RuntimeException e) {
+          log.error("Queue state metrics refresh failed", e);
+        }
+        nextQueueMetricsAt = nowNanos + queueMetricsIntervalNanos;
+      }
       sleep(properties.getCleanupInterval());
     }
+  }
+
+  private void runGuardedRuntimeTask(String taskName, Runnable runnable) {
+    try {
+      runnable.run();
+    } catch (Throwable e) {
+      if (running.get()) {
+        destroyApplication(
+            RUNTIME_TASK_FAILED_EXIT_CODE,
+            "Stopping application because task queue runtime task failed: " + taskName,
+            e);
+      }
+      rethrowUnchecked(e);
+    }
+  }
+
+  private static void rethrowUnchecked(Throwable failure) {
+    if (failure instanceof Error error) {
+      throw error;
+    }
+    if (failure instanceof RuntimeException runtimeException) {
+      throw runtimeException;
+    }
+    throw new IllegalStateException(failure);
   }
 
   /**
@@ -380,6 +495,77 @@ public class QueueWorkerRuntime {
     }
   }
 
+  private Duration taskLeaseRenewInterval() {
+    long leaseMillis = Math.max(1L, properties.getTaskLeaseTimeout().toMillis());
+    return Duration.ofMillis(Math.max(1L, leaseMillis / 3));
+  }
+
+  /** Монитор продления lease конкретной in-flight задачи. */
+  private final class TaskLeaseMonitor {
+    private final String workerId;
+    private final UUID taskId;
+    private final Thread processingThread;
+    private final Thread thread;
+    private final AtomicBoolean cancelled = new AtomicBoolean(false);
+
+    private TaskLeaseMonitor(String workerId, UUID taskId, Thread processingThread) {
+      this.workerId = workerId;
+      this.taskId = taskId;
+      this.processingThread = processingThread;
+      this.thread = new Thread(this::runLoop, "queue-task-lease-" + taskId);
+      this.thread.setDaemon(true);
+    }
+
+    private void start() {
+      thread.start();
+    }
+
+    private void stop() {
+      cancelled.set(true);
+      thread.interrupt();
+    }
+
+    private void runLoop() {
+      try {
+        loop();
+      } catch (Throwable e) {
+        if (running.get() && !cancelled.get()) {
+          destroyApplication(
+              RUNTIME_TASK_FAILED_EXIT_CODE, "Task lease monitor failed for task " + taskId, e);
+        }
+        rethrowUnchecked(e);
+      }
+    }
+
+    private void loop() {
+      Duration renewInterval = taskLeaseRenewInterval();
+      while (running.get() && !cancelled.get() && !Thread.currentThread().isInterrupted()) {
+        sleep(renewInterval);
+        if (!running.get() || cancelled.get() || Thread.currentThread().isInterrupted()) {
+          return;
+        }
+
+        try {
+          queueService.renewLease(taskId, workerId);
+        } catch (TaskOwnershipLostException e) {
+          log.warn(
+              "Task {} lease ownership lost by worker {}, interrupting processing thread",
+              taskId,
+              workerId);
+          processingThread.interrupt();
+          cancelled.set(true);
+          return;
+        } catch (RuntimeException e) {
+          destroyApplication(
+              TASK_STATE_UPDATE_FAILED_EXIT_CODE,
+              "Stopping application because task lease renewal failed, taskId=" + taskId,
+              e);
+          return;
+        }
+      }
+    }
+  }
+
   /** Монитор heartbeat конкретного воркера. */
   private final class HeartbeatMonitor {
     private final String workerId;
@@ -399,7 +585,7 @@ public class QueueWorkerRuntime {
      */
     private HeartbeatMonitor(String workerId) {
       this.workerId = workerId;
-      this.thread = new Thread(this::loop, "queue-heartbeat-" + workerId);
+      this.thread = new Thread(this::runLoop, "queue-heartbeat-" + workerId);
       this.thread.setDaemon(true);
     }
 
@@ -445,6 +631,18 @@ public class QueueWorkerRuntime {
         if (sendHeartbeatWithTimeout()) {
           return;
         }
+      }
+    }
+
+    private void runLoop() {
+      try {
+        loop();
+      } catch (Throwable e) {
+        if (running.get() && !cancelled.get()) {
+          requestApplicationStop(
+              RUNTIME_TASK_FAILED_EXIT_CODE, "Heartbeat monitor failed for worker " + workerId, e);
+        }
+        rethrowUnchecked(e);
       }
     }
 

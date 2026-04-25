@@ -100,6 +100,26 @@ public class WorkerCoordinationService {
     return deadWorkerIds.size();
   }
 
+  /**
+   * Освобождает задачи, lease которых истек, даже если heartbeat воркера еще жив.
+   *
+   * @return количество освобожденных задач
+   */
+  @Transactional(transactionManager = TaskQueueBeanNames.TRANSACTION_MANAGER)
+  public int cleanUpExpiredTaskLeases() {
+    int released = queueRepository.releaseExpiredTaskLeases(properties.getCleanupBatchSize());
+    metrics.expiredTaskLeasesReleased(released);
+    return released;
+  }
+
+  /** Обновляет aggregate-метрики состояния очереди. */
+  @Transactional(transactionManager = TaskQueueBeanNames.TRANSACTION_MANAGER, readOnly = true)
+  public void refreshQueueStateMetrics() {
+    metrics.setQueueState(queueRepository.loadQueueStateMetrics());
+    metrics.setPartitionLag(
+        queueRepository.loadPartitionLagMetrics(properties.getPartitionCount()));
+  }
+
   /** Принудительно запускает ребаланс партиций. */
   @SuppressWarnings("unused")
   @Transactional(transactionManager = TaskQueueBeanNames.TRANSACTION_MANAGER)

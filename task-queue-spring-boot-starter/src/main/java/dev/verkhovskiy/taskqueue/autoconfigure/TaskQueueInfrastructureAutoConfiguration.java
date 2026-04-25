@@ -1,6 +1,7 @@
 package dev.verkhovskiy.taskqueue.autoconfigure;
 
 import dev.verkhovskiy.taskqueue.config.TaskQueueBeanNames;
+import dev.verkhovskiy.taskqueue.config.TaskQueueProperties;
 import dev.verkhovskiy.taskqueue.service.TaskIdGenerator;
 import dev.verkhovskiy.taskqueue.service.UuidV7TaskIdGenerator;
 import java.time.Clock;
@@ -72,9 +73,15 @@ public class TaskQueueInfrastructureAutoConfiguration {
    */
   @Bean(name = TaskQueueBeanNames.JDBC_TEMPLATE)
   @ConditionalOnMissingBean(name = TaskQueueBeanNames.JDBC_TEMPLATE)
-  public JdbcTemplate taskQueueJdbcTemplate(ConfigurableListableBeanFactory beanFactory) {
+  public JdbcTemplate taskQueueJdbcTemplate(
+      ConfigurableListableBeanFactory beanFactory, TaskQueueProperties properties) {
     DataSource dataSource = beanFactory.getBean(TaskQueueBeanNames.DATA_SOURCE, DataSource.class);
-    return new JdbcTemplate(dataSource);
+    JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
+    int queryTimeoutSeconds = queryTimeoutSeconds(properties);
+    if (queryTimeoutSeconds > 0) {
+      jdbcTemplate.setQueryTimeout(queryTimeoutSeconds);
+    }
+    return jdbcTemplate;
   }
 
   /**
@@ -225,5 +232,14 @@ public class TaskQueueInfrastructureAutoConfiguration {
     } catch (NoSuchBeanDefinitionException ignored) {
       return false;
     }
+  }
+
+  private static int queryTimeoutSeconds(TaskQueueProperties properties) {
+    long timeoutMillis = properties.getJdbcStatementTimeout().toMillis();
+    if (timeoutMillis <= 0) {
+      return 0;
+    }
+    long timeoutSeconds = Math.ceilDiv(timeoutMillis, 1_000L);
+    return timeoutSeconds > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) timeoutSeconds;
   }
 }

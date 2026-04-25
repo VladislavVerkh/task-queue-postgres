@@ -53,3 +53,21 @@ databaseChangeLog:
             relativeToChangelogFile: true
             splitStatements: true
             stripComments: false
+  - changeSet:
+      id: 007-task-queue-task-lease
+      author: task-queue
+      changes:
+        - sqlFile:
+            path: changes/007-task-queue-task-lease.sql
+            relativeToChangelogFile: true
+            splitStatements: true
+            stripComments: false
+  - changeSet:
+      id: 008-task-queue-metadata
+      author: task-queue
+      changes:
+        - sqlFile:
+            path: changes/008-task-queue-metadata.sql
+            relativeToChangelogFile: true
+            splitStatements: true
+            stripComments: false

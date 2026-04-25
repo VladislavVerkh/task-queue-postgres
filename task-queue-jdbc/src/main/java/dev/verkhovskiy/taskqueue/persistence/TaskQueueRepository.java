@@ -4,6 +4,7 @@ import dev.verkhovskiy.taskqueue.config.TaskQueueBeanNames;
 import dev.verkhovskiy.taskqueue.domain.QueuedTask;
 import dev.verkhovskiy.taskqueue.exception.TaskOwnershipLostException;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -96,34 +97,52 @@ public class TaskQueueRepository {
    *
    * @param workerId идентификатор воркера
    * @param maxCount максимум задач в ответе
-   * @param now текущее время
+   * @param maxTasksPerPartition максимум задач из одной партиции за один poll
+   * @param leaseTimeout длительность lease для захваченных задач
    * @return список задач, закрепленных за воркером
    */
-  public List<QueuedTask> lockNextTasksForWorker(String workerId, int maxCount, Instant now) {
+  public List<QueuedTask> lockNextTasksForWorker(
+      String workerId, int maxCount, int maxTasksPerPartition, Duration leaseTimeout) {
     return jdbc.query(
         """
-            with candidate as (
+            with runtime_clock as (
+                select clock_timestamp() as now
+            ),
+            candidate as (
                 select q.task_id
-                 from task_worker_partition_assignment a
-                  join task_queue q on q.partition_num = a.partition_num
+                 from runtime_clock
+                  join task_worker_partition_assignment a on true
+                  cross join lateral (
+                      select q.task_id,
+                             q.available_at,
+                             q.created_at
+                        from task_queue q
+                       where q.partition_num = a.partition_num
+                         and q.available_at <= runtime_clock.now
+                         and q.worker_id is null
+                       order by q.available_at, q.created_at, q.task_id
+                       for update of q skip locked
+                       limit :maxTasksPerPartition
+                  ) q
                  where a.worker_id = :workerId
                    and a.handoff_state = 'ACTIVE'
-                   and q.available_at <= :now
-                   and q.worker_id is null
                  order by q.available_at, q.created_at, q.task_id
-                 for update of q skip locked
                  limit :maxCount
             )
             update task_queue q
-               set worker_id = :workerId
-              from candidate c
+               set worker_id = :workerId,
+                   locked_at = runtime_clock.now,
+                   lease_until =
+                       runtime_clock.now + (:leaseTimeoutMillis * interval '1 millisecond')
+              from candidate c, runtime_clock
              where q.task_id = c.task_id
             returning q.task_id, q.task_type, q.payload, q.partition_key, q.partition_num, q.available_at, q.delay_count, q.created_at
             """,
         new MapSqlParameterSource()
             .addValue("workerId", workerId)
             .addValue("maxCount", maxCount)
-            .addValue("now", toOffsetDateTime(now)),
+            .addValue("maxTasksPerPartition", maxTasksPerPartition)
+            .addValue("leaseTimeoutMillis", Math.max(1L, leaseTimeout.toMillis())),
         QUEUED_TASK_ROW_MAPPER);
   }
 
@@ -163,7 +182,9 @@ public class TaskQueueRepository {
             update task_queue
                set available_at = :availableAt,
                    delay_count = delay_count + 1,
-                   worker_id = null
+                   worker_id = null,
+                   locked_at = null,
+                   lease_until = null
              where task_id = :taskId
                and worker_id = :workerId
             """,
@@ -171,6 +192,33 @@ public class TaskQueueRepository {
                 .addValue("taskId", taskId)
                 .addValue("workerId", workerId)
                 .addValue("availableAt", toOffsetDateTime(availableAt)));
+    if (updated == 0) {
+      throw new TaskOwnershipLostException(taskId, workerId);
+    }
+  }
+
+  /**
+   * Продлевает lease задачи, если она все еще закреплена за ожидаемым воркером.
+   *
+   * @param taskId идентификатор задачи
+   * @param workerId идентификатор воркера-владельца
+   * @param leaseTimeout длительность нового lease
+   * @throws TaskOwnershipLostException если задача отсутствует или закреплена за другим воркером
+   */
+  public void renewLeaseOwnedBy(UUID taskId, String workerId, Duration leaseTimeout) {
+    int updated =
+        jdbc.update(
+            """
+            update task_queue
+               set lease_until =
+                       clock_timestamp() + (:leaseTimeoutMillis * interval '1 millisecond')
+             where task_id = :taskId
+               and worker_id = :workerId
+            """,
+            new MapSqlParameterSource()
+                .addValue("taskId", taskId)
+                .addValue("workerId", workerId)
+                .addValue("leaseTimeoutMillis", Math.max(1L, leaseTimeout.toMillis())));
     if (updated == 0) {
       throw new TaskOwnershipLostException(taskId, workerId);
     }
@@ -258,6 +306,97 @@ public class TaskQueueRepository {
   }
 
   /**
+   * Возвращает dead-letter задачу в основную очередь.
+   *
+   * @param taskId идентификатор dead-letter задачи
+   * @param availableAt время, когда задача станет доступна для обработки
+   * @return {@code true}, если задача перенесена в основную очередь
+   */
+  public boolean requeueDeadLetter(UUID taskId, Instant availableAt) {
+    Integer moved =
+        jdbc.queryForObject(
+            """
+            with candidate as (
+                select task_id,
+                       task_type,
+                       payload,
+                       partition_key,
+                       partition_num,
+                       original_created_at
+                  from task_queue_dead_letter
+                 where task_id = :taskId
+            ),
+            inserted as (
+                insert into task_queue(
+                    task_id,
+                    task_type,
+                    payload,
+                    partition_key,
+                    partition_num,
+                    available_at,
+                    delay_count,
+                    worker_id,
+                    created_at,
+                    locked_at,
+                    lease_until
+                )
+                select task_id,
+                       task_type,
+                       payload,
+                       partition_key,
+                       partition_num,
+                       :availableAt,
+                       0,
+                       null,
+                       original_created_at,
+                       null,
+                       null
+                  from candidate
+                on conflict (task_id) do nothing
+                returning task_id
+            ),
+            deleted as (
+                delete from task_queue_dead_letter dl
+                 using inserted i
+                 where dl.task_id = i.task_id
+                returning dl.task_id
+            )
+            select count(*) from deleted
+            """,
+            new MapSqlParameterSource()
+                .addValue("taskId", taskId)
+                .addValue("availableAt", toOffsetDateTime(availableAt)),
+            Integer.class);
+    return moved != null && moved > 0;
+  }
+
+  /**
+   * Удаляет старые записи dead-letter.
+   *
+   * @param cutoff удаляются записи старше этого момента
+   * @param limit максимальное количество удаляемых записей
+   * @return количество удаленных записей
+   */
+  public int deleteDeadLettersOlderThan(Instant cutoff, int limit) {
+    return jdbc.update(
+        """
+            with expired as (
+                select task_id
+                  from task_queue_dead_letter
+                 where dead_lettered_at < :cutoff
+                 order by dead_lettered_at, task_id
+                 limit :limit
+            )
+            delete from task_queue_dead_letter dl
+             using expired e
+             where dl.task_id = e.task_id
+            """,
+        new MapSqlParameterSource()
+            .addValue("cutoff", toOffsetDateTime(cutoff))
+            .addValue("limit", limit));
+  }
+
+  /**
    * Снимает закрепление всех задач, ранее взятых конкретным воркером.
    *
    * @param workerId идентификатор воркера
@@ -266,10 +405,147 @@ public class TaskQueueRepository {
     jdbc.update(
         """
                 update task_queue
-                   set worker_id = null
+                   set worker_id = null,
+                       locked_at = null,
+                       lease_until = null
                  where worker_id = :workerId
                 """,
         new MapSqlParameterSource("workerId", workerId));
+  }
+
+  /**
+   * Освобождает задачи, у которых истек lease обработки.
+   *
+   * @param limit максимальное количество задач за один cleanup
+   * @return количество освобожденных задач
+   */
+  public int releaseExpiredTaskLeases(int limit) {
+    return jdbc.update(
+        """
+            with expired as (
+                select task_id
+                  from task_queue
+                 where worker_id is not null
+                   and lease_until is not null
+                   and lease_until < clock_timestamp()
+                 order by lease_until, task_id
+                 for update skip locked
+                 limit :limit
+            )
+            update task_queue q
+               set worker_id = null,
+                   locked_at = null,
+                   lease_until = null
+              from expired e
+             where q.task_id = e.task_id
+            """,
+        new MapSqlParameterSource("limit", limit));
+  }
+
+  /** Загружает текущие aggregate-метрики состояния очереди. */
+  public QueueStateMetrics loadQueueStateMetrics() {
+    return jdbc.queryForObject(
+        """
+            with runtime_clock as (
+                select clock_timestamp() as now
+            ),
+            aggregates as (
+                select runtime_clock.now,
+                       count(q.task_id)
+                           filter (
+                               where q.worker_id is null
+                                 and q.available_at <= runtime_clock.now
+                           ) as ready_tasks,
+                       count(q.task_id)
+                           filter (where q.worker_id is not null) as in_flight_tasks,
+                       min(q.created_at)
+                           filter (
+                               where q.worker_id is null
+                                 and q.available_at <= runtime_clock.now
+                           ) as oldest_ready_created_at,
+                       min(q.locked_at)
+                           filter (
+                               where q.worker_id is not null
+                                 and q.locked_at is not null
+                           ) as oldest_in_flight_locked_at
+                  from runtime_clock
+                  left join task_queue q on true
+                 group by runtime_clock.now
+            )
+            select ready_tasks,
+                   in_flight_tasks,
+                   coalesce(
+                       floor(
+                           extract(
+                               epoch from now - oldest_ready_created_at
+                           )
+                       ),
+                       0
+                   )::bigint as oldest_ready_age_seconds,
+                   coalesce(
+                       floor(
+                           extract(
+                               epoch from now - oldest_in_flight_locked_at
+                           )
+                       ),
+                       0
+                   )::bigint as oldest_in_flight_age_seconds
+              from aggregates
+            """,
+        new MapSqlParameterSource(),
+        (rs, rowNum) ->
+            new QueueStateMetrics(
+                rs.getLong("ready_tasks"),
+                rs.getLong("in_flight_tasks"),
+                rs.getLong("oldest_ready_age_seconds"),
+                rs.getLong("oldest_in_flight_age_seconds")));
+  }
+
+  /**
+   * Загружает lag-метрики по каждой партиции.
+   *
+   * @param partitionCount количество логических партиций
+   * @return список снимков по партициям
+   */
+  public List<PartitionLagMetrics> loadPartitionLagMetrics(int partitionCount) {
+    return jdbc.query(
+        """
+            with runtime_clock as (
+                select clock_timestamp() as now
+            ),
+            partitions as (
+                select generate_series(1, :partitionCount) as partition_num
+            )
+            select p.partition_num,
+                   count(q.task_id)
+                       filter (
+                           where q.worker_id is null
+                             and q.available_at <= runtime_clock.now
+                       ) as ready_tasks,
+                   coalesce(
+                       floor(
+                           extract(
+                               epoch from runtime_clock.now - min(q.created_at)
+                                   filter (
+                                       where q.worker_id is null
+                                         and q.available_at <= runtime_clock.now
+                                   )
+                           )
+                       ),
+                       0
+                   )::bigint as oldest_ready_age_seconds
+              from partitions p
+              cross join runtime_clock
+              left join task_queue q on q.partition_num = p.partition_num
+             group by p.partition_num, runtime_clock.now
+             order by p.partition_num
+            """,
+        new MapSqlParameterSource("partitionCount", partitionCount),
+        (rs, rowNum) ->
+            new PartitionLagMetrics(
+                rs.getInt("partition_num"),
+                rs.getLong("ready_tasks"),
+                rs.getLong("oldest_ready_age_seconds")));
   }
 
   /**
@@ -307,4 +583,28 @@ public class TaskQueueRepository {
   private static OffsetDateTime toOffsetDateTime(Instant instant) {
     return OffsetDateTime.ofInstant(instant, ZoneOffset.UTC);
   }
+
+  /**
+   * Aggregate-снимок состояния очереди для метрик.
+   *
+   * @param readyTasks количество доступных незахваченных задач
+   * @param inFlightTasks количество задач, закрепленных за воркерами
+   * @param oldestReadyAgeSeconds возраст самой старой доступной задачи в секундах
+   * @param oldestInFlightAgeSeconds возраст самой старой in-flight задачи в секундах
+   */
+  public record QueueStateMetrics(
+      long readyTasks,
+      long inFlightTasks,
+      long oldestReadyAgeSeconds,
+      long oldestInFlightAgeSeconds) {}
+
+  /**
+   * Снимок lag-метрик конкретной партиции.
+   *
+   * @param partitionNum номер партиции
+   * @param readyTasks количество готовых задач в партиции
+   * @param oldestReadyAgeSeconds возраст самой старой готовой задачи в секундах
+   */
+  public record PartitionLagMetrics(
+      int partitionNum, long readyTasks, long oldestReadyAgeSeconds) {}
 }

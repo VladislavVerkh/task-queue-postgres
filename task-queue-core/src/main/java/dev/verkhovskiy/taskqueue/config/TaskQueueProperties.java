@@ -29,10 +29,15 @@ public class TaskQueueProperties {
   private boolean runtimeEnabled = true;
   @Positive private int workerCount = 2;
   @Positive private int pollBatchSize = 50;
+  @Positive private int pollMaxTasksPerPartition = 5;
 
   @NotNull
   @DurationMin(millis = 1)
   private Duration pollInterval = Duration.ofMillis(250);
+
+  @NotNull
+  @DurationMin(millis = 1)
+  private Duration taskLeaseTimeout = Duration.ofMinutes(5);
 
   @NotNull
   @DurationMin(millis = 1)
@@ -57,6 +62,14 @@ public class TaskQueueProperties {
   @NotNull
   @DurationMin(millis = 1)
   private Duration cleanupInterval = Duration.ofSeconds(1);
+
+  @NotNull
+  @DurationMin(millis = 1)
+  private Duration queueMetricsInterval = Duration.ofSeconds(10);
+
+  @NotNull
+  @DurationMin(millis = 1)
+  private Duration shutdownTimeout = Duration.ofSeconds(20);
 
   @Positive private int cleanupBatchSize = 32;
   @PositiveOrZero private int retryMaxAttempts = 3;
@@ -84,6 +97,10 @@ public class TaskQueueProperties {
   private boolean deadLetterEnabled = false;
 
   @NotNull
+  @DurationMin(millis = 0)
+  private Duration deadLetterRetention = Duration.ZERO;
+
+  @NotNull
   private TaskHandlingTransactionMode handlingTransactionMode =
       TaskHandlingTransactionMode.TRANSACTIONAL;
 
@@ -98,6 +115,10 @@ public class TaskQueueProperties {
   @NotNull private HandoffTimeoutAction handoffTimeoutAction = HandoffTimeoutAction.EXTEND;
 
   private long rebalanceLockKey = 584_231_947_015L;
+
+  @NotNull
+  @DurationMin(millis = 0)
+  private Duration jdbcStatementTimeout = Duration.ZERO;
 
   /**
    * Проверяет согласованность диапазона задержек retry.

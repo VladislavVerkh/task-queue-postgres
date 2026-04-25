@@ -92,12 +92,10 @@ public class WorkerRegistryRepository {
         jdbc.update(
             """
             update task_worker_registry
-               set heartbeat_last = :heartbeatLast
+               set heartbeat_last = clock_timestamp()
              where worker_id = :workerId
             """,
-            new MapSqlParameterSource()
-                .addValue("heartbeatLast", toOffsetDateTime(heartbeatLast))
-                .addValue("workerId", workerId));
+            new MapSqlParameterSource().addValue("workerId", workerId));
     if (updated == 0) {
       throw new WorkerRegistrationNotFoundException(workerId);
     }
@@ -118,7 +116,7 @@ public class WorkerRegistryRepository {
         """
             select worker_id
               from task_worker_registry
-             where heartbeat_last < :now
+             where heartbeat_last < clock_timestamp()
                                    - make_interval(secs => timeout_sec * :timeoutMultiplier)
                                    - make_interval(secs => :heartbeatDeviationSec)
              order by heartbeat_last
@@ -126,7 +124,6 @@ public class WorkerRegistryRepository {
              limit :limit
             """,
         new MapSqlParameterSource()
-            .addValue("now", toOffsetDateTime(now))
             .addValue("heartbeatDeviationSec", heartbeatDeviationSec)
             .addValue("timeoutMultiplier", timeoutMultiplier)
             .addValue("limit", limit),

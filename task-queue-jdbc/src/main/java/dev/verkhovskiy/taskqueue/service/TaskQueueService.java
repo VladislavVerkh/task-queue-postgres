@@ -67,7 +67,11 @@ public class TaskQueueService {
   @Transactional(transactionManager = TaskQueueBeanNames.TRANSACTION_MANAGER)
   public List<QueuedTask> dequeueForWorker(String workerId, int maxCount) {
     workerRegistryRepository.lockShared(properties.getRebalanceLockKey());
-    return queueRepository.lockNextTasksForWorker(workerId, maxCount, clock.instant());
+    return queueRepository.lockNextTasksForWorker(
+        workerId,
+        maxCount,
+        properties.getPollMaxTasksPerPartition(),
+        properties.getTaskLeaseTimeout());
   }
 
   /**
@@ -80,6 +84,18 @@ public class TaskQueueService {
   public void acknowledge(UUID taskId, String workerId) {
     requireWorkerId(workerId);
     queueRepository.removeOwnedBy(taskId, workerId);
+  }
+
+  /**
+   * Продлевает lease задачи только если задача все еще закреплена за воркером.
+   *
+   * @param taskId идентификатор задачи
+   * @param workerId идентификатор воркера-владельца
+   */
+  @Transactional(transactionManager = TaskQueueBeanNames.TRANSACTION_MANAGER)
+  public void renewLease(UUID taskId, String workerId) {
+    requireWorkerId(workerId);
+    queueRepository.renewLeaseOwnedBy(taskId, workerId, properties.getTaskLeaseTimeout());
   }
 
   private static void requireWorkerId(String workerId) {

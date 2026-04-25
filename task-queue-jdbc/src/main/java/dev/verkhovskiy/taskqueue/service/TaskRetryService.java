@@ -2,6 +2,7 @@ package dev.verkhovskiy.taskqueue.service;
 
 import dev.verkhovskiy.taskqueue.config.TaskQueueBeanNames;
 import dev.verkhovskiy.taskqueue.config.TaskQueueProperties;
+import dev.verkhovskiy.taskqueue.metrics.TaskQueueMetrics;
 import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository;
 import dev.verkhovskiy.taskqueue.retry.RetryBackoffDecision;
 import dev.verkhovskiy.taskqueue.retry.RetryBackoffPolicy;
@@ -26,6 +27,7 @@ public class TaskRetryService {
   private final RetryBackoffPolicy retryBackoffPolicy;
   private final RetryExceptionClassifier retryExceptionClassifier;
   private final TaskQueueProperties properties;
+  private final TaskQueueMetrics metrics;
   private final Clock clock;
 
   /**
@@ -42,6 +44,7 @@ public class TaskRetryService {
       UUID taskId, long alreadyRetriedCount, Throwable failure, String workerId) {
     requireWorkerId(workerId);
     if (!retryExceptionClassifier.isRetryable(failure)) {
+      metrics.nonRetryable();
       finalizeTask(taskId, workerId, DEAD_LETTER_REASON_NON_RETRYABLE, failure);
       return RetryBackoffDecision.nonRetryable(nextAttempt(alreadyRetriedCount));
     }
@@ -72,9 +75,11 @@ public class TaskRetryService {
     if (decision.shouldRetry()) {
       Instant availableAt = clock.instant().plusMillis(decision.delayMillis());
       queueRepository.delayOwnedBy(taskId, workerId, availableAt);
+      metrics.retryScheduled();
       return decision;
     }
 
+    metrics.retryExhausted();
     finalizeTask(taskId, workerId, DEAD_LETTER_REASON_RETRY_EXHAUSTED, failure);
     return decision;
   }
@@ -93,6 +98,7 @@ public class TaskRetryService {
         errorClass(failure),
         errorMessage(failure),
         clock.instant());
+    metrics.deadLettered();
   }
 
   /**
