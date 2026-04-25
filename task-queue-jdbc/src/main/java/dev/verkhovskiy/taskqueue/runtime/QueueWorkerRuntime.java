@@ -26,6 +26,8 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -77,6 +79,7 @@ public class QueueWorkerRuntime implements SmartLifecycle {
 
   private ExecutorService workerExecutor;
   private ExecutorService heartbeatExecutor;
+  private ScheduledExecutorService leaseExecutor;
 
   /** Запускает фоновые циклы обработки и heartbeat при старте lifecycle. */
   @Override
@@ -103,6 +106,15 @@ public class QueueWorkerRuntime implements SmartLifecycle {
               Thread thread = new Thread(runnable);
               thread.setDaemon(true);
               thread.setName("task-runtime-heartbeat-" + THREAD_COUNTER.incrementAndGet());
+              return thread;
+            });
+    leaseExecutor =
+        Executors.newScheduledThreadPool(
+            Math.max(1, properties.getWorkerCount()),
+            runnable -> {
+              Thread thread = new Thread(runnable);
+              thread.setDaemon(true);
+              thread.setName("task-runtime-lease-" + THREAD_COUNTER.incrementAndGet());
               return thread;
             });
 
@@ -144,11 +156,20 @@ public class QueueWorkerRuntime implements SmartLifecycle {
           log.warn("Task heartbeat executor was not stopped gracefully within timeout");
         }
       }
+      if (leaseExecutor != null) {
+        leaseExecutor.shutdownNow();
+        if (!leaseExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+          log.warn("Task lease executor was not stopped gracefully within timeout");
+        }
+      }
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       workerExecutor.shutdownNow();
       if (heartbeatExecutor != null) {
         heartbeatExecutor.shutdownNow();
+      }
+      if (leaseExecutor != null) {
+        leaseExecutor.shutdownNow();
       }
     }
   }
@@ -507,63 +528,58 @@ public class QueueWorkerRuntime implements SmartLifecycle {
     private final String workerId;
     private final UUID taskId;
     private final Thread processingThread;
-    private final Thread thread;
     private final AtomicBoolean cancelled = new AtomicBoolean(false);
+    private ScheduledFuture<?> future;
 
     private TaskLeaseMonitor(String workerId, UUID taskId, Thread processingThread) {
       this.workerId = workerId;
       this.taskId = taskId;
       this.processingThread = processingThread;
-      this.thread = new Thread(this::runLoop, "queue-task-lease-" + taskId);
-      this.thread.setDaemon(true);
     }
 
     private void start() {
-      thread.start();
+      long renewIntervalMillis = Math.max(1L, taskLeaseRenewInterval().toMillis());
+      future =
+          leaseExecutor.scheduleWithFixedDelay(
+              this::renewLease, renewIntervalMillis, renewIntervalMillis, TimeUnit.MILLISECONDS);
     }
 
     private void stop() {
       cancelled.set(true);
-      thread.interrupt();
+      ScheduledFuture<?> scheduledFuture = future;
+      if (scheduledFuture != null) {
+        scheduledFuture.cancel(true);
+      }
     }
 
-    private void runLoop() {
+    private void renewLease() {
+      if (!running.get() || cancelled.get() || Thread.currentThread().isInterrupted()) {
+        return;
+      }
+
       try {
-        loop();
+        queueService.renewLease(taskId, workerId);
+      } catch (TaskOwnershipLostException e) {
+        log.warn(
+            "Task {} lease ownership lost by worker {}, interrupting processing thread",
+            taskId,
+            workerId);
+        processingThread.interrupt();
+        cancelled.set(true);
+      } catch (RuntimeException e) {
+        cancelled.set(true);
+        destroyApplication(
+            TASK_STATE_UPDATE_FAILED_EXIT_CODE,
+            "Stopping application because task lease renewal failed, taskId=" + taskId,
+            e);
+        throw e;
       } catch (Throwable e) {
-        if (running.get() && !cancelled.get()) {
+        cancelled.set(true);
+        if (running.get()) {
           destroyApplication(
               RUNTIME_TASK_FAILED_EXIT_CODE, "Task lease monitor failed for task " + taskId, e);
         }
         rethrowUnchecked(e);
-      }
-    }
-
-    private void loop() {
-      Duration renewInterval = taskLeaseRenewInterval();
-      while (running.get() && !cancelled.get() && !Thread.currentThread().isInterrupted()) {
-        sleep(renewInterval);
-        if (!running.get() || cancelled.get() || Thread.currentThread().isInterrupted()) {
-          return;
-        }
-
-        try {
-          queueService.renewLease(taskId, workerId);
-        } catch (TaskOwnershipLostException e) {
-          log.warn(
-              "Task {} lease ownership lost by worker {}, interrupting processing thread",
-              taskId,
-              workerId);
-          processingThread.interrupt();
-          cancelled.set(true);
-          return;
-        } catch (RuntimeException e) {
-          destroyApplication(
-              TASK_STATE_UPDATE_FAILED_EXIT_CODE,
-              "Stopping application because task lease renewal failed, taskId=" + taskId,
-              e);
-          return;
-        }
       }
     }
   }
