@@ -81,6 +81,7 @@ public class TaskQueueProperties {
   @NotNull private List<String> notRetryableExceptions = List.of();
   private boolean retryExceptionTraverseCauses = true;
   private boolean retryDefaultRetryable = true;
+  private boolean deadLetterEnabled = false;
 
   @NotNull
   private TaskHandlingTransactionMode handlingTransactionMode =

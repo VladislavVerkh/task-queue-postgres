@@ -40,7 +40,9 @@ import org.testcontainers.junit.jupiter.Testcontainers;
       "task.queue.partition-count=20",
       "task.queue.process-timeout=10s",
       "task.queue.heartbeat-deviation=0s",
-      "task.queue.cleanup-batch-size=100"
+      "task.queue.cleanup-batch-size=100",
+      "task.queue.dead-letter-enabled=true",
+      "task.queue.not-retryable-exceptions=java.lang.IllegalArgumentException"
     })
 @Testcontainers(disabledWithoutDocker = true)
 class TaskQueueIntegrationTest {
@@ -71,6 +73,7 @@ class TaskQueueIntegrationTest {
 
   @BeforeEach
   void cleanTables() {
+    jdbc.update("delete from task_queue_dead_letter", new MapSqlParameterSource());
     jdbc.update("delete from task_queue", new MapSqlParameterSource());
     jdbc.update("delete from task_worker_registry", new MapSqlParameterSource());
   }
@@ -180,6 +183,56 @@ class TaskQueueIntegrationTest {
             new MapSqlParameterSource("taskId", taskId));
     assertEquals(P2W1, row.get("worker_id"));
     assertEquals(0L, row.get("delay_count"));
+  }
+
+  @Test
+  void nonRetryableTaskIsMovedToDeadLetterWhenEnabled() {
+    workerCoordinationService.registerWorker(P1W1);
+
+    UUID taskId = UUID.randomUUID();
+    Instant now = Instant.now();
+    queueRepository.enqueue(taskId, "integration-test", "{}", "k", 1, now, now);
+
+    List<QueuedTask> lockedTasks = queueService.dequeueForWorker(P1W1, 1);
+    assertEquals(1, lockedTasks.size());
+    IllegalArgumentException failure = new IllegalArgumentException("bad payload");
+
+    retryService.retryOrFinalize(taskId, lockedTasks.getFirst().delayCount(), failure, P1W1);
+
+    Integer queueRows =
+        jdbc.queryForObject(
+            "select count(*) from task_queue where task_id = :taskId",
+            new MapSqlParameterSource("taskId", taskId),
+            Integer.class);
+    assertEquals(0, queueRows);
+
+    Map<String, Object> deadLetterRow =
+        jdbc.queryForMap(
+            """
+            select task_type,
+                   payload,
+                   partition_key,
+                   partition_num,
+                   delay_count,
+                   attempt_count,
+                   failed_worker_id,
+                   reason,
+                   error_class,
+                   error_message
+              from task_queue_dead_letter
+             where task_id = :taskId
+            """,
+            new MapSqlParameterSource("taskId", taskId));
+    assertEquals("integration-test", deadLetterRow.get("task_type"));
+    assertEquals("{}", deadLetterRow.get("payload"));
+    assertEquals("k", deadLetterRow.get("partition_key"));
+    assertEquals(1, deadLetterRow.get("partition_num"));
+    assertEquals(0L, deadLetterRow.get("delay_count"));
+    assertEquals(1L, deadLetterRow.get("attempt_count"));
+    assertEquals(P1W1, deadLetterRow.get("failed_worker_id"));
+    assertEquals("NON_RETRYABLE", deadLetterRow.get("reason"));
+    assertEquals(IllegalArgumentException.class.getName(), deadLetterRow.get("error_class"));
+    assertEquals("bad payload", deadLetterRow.get("error_message"));
   }
 
   @Test

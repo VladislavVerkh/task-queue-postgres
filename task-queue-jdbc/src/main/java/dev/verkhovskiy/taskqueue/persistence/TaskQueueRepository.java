@@ -177,6 +177,87 @@ public class TaskQueueRepository {
   }
 
   /**
+   * Копирует задачу в dead-letter и удаляет ее только если она все еще закреплена за ожидаемым
+   * воркером.
+   *
+   * @param taskId идентификатор задачи
+   * @param workerId идентификатор воркера-владельца
+   * @param reason причина финализации задачи
+   * @param errorClass класс последней ошибки
+   * @param errorMessage сообщение последней ошибки
+   * @param deadLetteredAt время переноса в dead-letter
+   * @throws TaskOwnershipLostException если задача отсутствует или закреплена за другим воркером
+   */
+  public void deadLetterOwnedBy(
+      UUID taskId,
+      String workerId,
+      String reason,
+      String errorClass,
+      String errorMessage,
+      Instant deadLetteredAt) {
+    int inserted =
+        jdbc.update(
+            """
+            insert into task_queue_dead_letter(
+                task_id,
+                task_type,
+                payload,
+                partition_key,
+                partition_num,
+                delay_count,
+                attempt_count,
+                failed_worker_id,
+                reason,
+                error_class,
+                error_message,
+                original_created_at,
+                dead_lettered_at
+            )
+            select q.task_id,
+                   q.task_type,
+                   q.payload,
+                   q.partition_key,
+                   q.partition_num,
+                   q.delay_count,
+                   q.delay_count + 1,
+                   :workerId,
+                   :reason,
+                   :errorClass,
+                   :errorMessage,
+                   q.created_at,
+                   :deadLetteredAt
+              from task_queue q
+             where q.task_id = :taskId
+               and q.worker_id = :workerId
+            on conflict (task_id)
+            do update
+                  set task_type = excluded.task_type,
+                      payload = excluded.payload,
+                      partition_key = excluded.partition_key,
+                      partition_num = excluded.partition_num,
+                      delay_count = excluded.delay_count,
+                      attempt_count = excluded.attempt_count,
+                      failed_worker_id = excluded.failed_worker_id,
+                      reason = excluded.reason,
+                      error_class = excluded.error_class,
+                      error_message = excluded.error_message,
+                      original_created_at = excluded.original_created_at,
+                      dead_lettered_at = excluded.dead_lettered_at
+            """,
+            new MapSqlParameterSource()
+                .addValue("taskId", taskId)
+                .addValue("workerId", workerId)
+                .addValue("reason", reason)
+                .addValue("errorClass", errorClass)
+                .addValue("errorMessage", errorMessage)
+                .addValue("deadLetteredAt", toOffsetDateTime(deadLetteredAt)));
+    if (inserted == 0) {
+      throw new TaskOwnershipLostException(taskId, workerId);
+    }
+    removeOwnedBy(taskId, workerId);
+  }
+
+  /**
    * Снимает закрепление всех задач, ранее взятых конкретным воркером.
    *
    * @param workerId идентификатор воркера

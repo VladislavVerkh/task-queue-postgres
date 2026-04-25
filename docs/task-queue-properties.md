@@ -28,6 +28,7 @@
 | `task.queue.not-retryable-exceptions`              | `List<String>` | Список FQCN non-retryable-исключений                              | `[]`                  | Классы должны существовать и быть `Throwable` |
 | `task.queue.retry-exception-traverse-causes`       | `boolean`      | Проверять цепочку `cause` при классификации                       | `true`                | `true/false`                                  |
 | `task.queue.retry-default-retryable`               | `boolean`      | Поведение по умолчанию, если класс не матчится                    | `true`                | `true/false`                                  |
+| `task.queue.dead-letter-enabled`                   | `boolean`      | Копировать финализированные задачи в `task_queue_dead_letter`     | `false`               | `true/false`                                  |
 | `task.queue.handling-transaction-mode`             | `enum`         | Режим обработки хэндлера: в общей транзакции с `ack` или без нее  | `TRANSACTIONAL`       | `TRANSACTIONAL` / `NON_TRANSACTIONAL`         |
 | `task.queue.handoff-drain-timeout`                 | `Duration`     | Максимальная длительность `DRAINING` до применения timeout policy | `30s`                 | `>= 1ms`                                      |
 | `task.queue.handoff-reconcile-interval`            | `Duration`     | Период фоновой синхронизации `DRAINING` handoff                   | `1s`                  | `>= 1ms`                                      |
@@ -47,6 +48,7 @@ task.queue.retry-backoff-strategy=EXPONENTIAL
 task.queue.retry-initial-delay=1s
 task.queue.retry-max-delay=30s
 task.queue.retry-backoff-multiplier=2.0
+task.queue.dead-letter-enabled=true
 # Классификация ошибок
 task.queue.retryable-exceptions=java.io.IOException,java.util.concurrent.TimeoutException
 task.queue.not-retryable-exceptions=java.lang.IllegalArgumentException
@@ -62,3 +64,13 @@ task.queue.handling-transaction-mode=TRANSACTIONAL
   - `EXTEND` — безопасный дефолт: ownership не передается, дедлайн продлевается.
   - `ABORT` — откат handoff: партиция возвращается в `ACTIVE` у текущего owner.
   - `FORCE` — принудительная передача ownership новому owner даже при наличии in-flight у старого.
+
+## Dead Letter
+
+`task.queue.dead-letter-enabled=false` сохраняет старое поведение: non-retryable задачи и задачи с
+исчерпанными retry удаляются из основной очереди без архивирования.
+
+Если `task.queue.dead-letter-enabled=true`, перед удалением такая задача копируется в
+`task_queue_dead_letter` вместе с payload, partition key, количеством попыток, workerId, причиной
+финализации (`NON_RETRYABLE` или `RETRY_EXHAUSTED`) и последней ошибкой. Запись выполняется в той же
+транзакции, что и owner-checked удаление из `task_queue`.

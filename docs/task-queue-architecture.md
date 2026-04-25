@@ -4,7 +4,7 @@
 
 Библиотека реализует распределенную обработку задач в PostgreSQL-очереди с семантикой:
 
-- последовательная обработка задач с одинаковым `partition_key`;
+- последовательная обработка доступных задач с одинаковым `partition_key` в штатном сценарии;
 - горизонтальное масштабирование по воркерам;
 - heartbeat/детект «мертвых» воркеров;
 - ребаланс закрепления партиций между живыми воркерами;
@@ -63,7 +63,33 @@
       вызывает owner-checked `acknowledge(taskId, workerId)` отдельной транзакцией.
 5. После отката при ошибке вызывается `TaskRetryService.retryOrFinalize(...)`:
     - non-retryable: удалить задачу;
-    - retryable: либо `delay(...)`, либо удалить при исчерпании попыток.
+    - retryable: либо `delay(...)`, либо удалить при исчерпании попыток;
+    - если `task.queue.dead-letter-enabled=true`, финализированная задача перед удалением
+      копируется в `task_queue_dead_letter`.
+
+### Гарантия порядка и retry
+
+Очередь сохраняет последовательность для доступных задач внутри одной логической партиции, но при
+ошибках возможен reordering. Если первая задача с `partition_key=K` упала и перенесена на retry с
+будущим `available_at`, следующая задача с тем же ключом может стать доступной и быть обработана
+раньше повторной попытки первой задачи.
+
+Это осознанный trade-off текущей модели: retry не блокирует весь ключ или партицию. Если конкретному
+обработчику нужна строгая FIFO-семантика даже через retry, он должен быть идемпотентным и/или
+самостоятельно проверять бизнес-версию/состояние. Альтернативный режим со строгим
+head-of-line blocking можно добавить отдельно, но он снизит throughput для ключей с проблемными
+задачами.
+
+### Выбор количества партиций
+
+`task.queue.partition-count` нужно выбирать с запасом относительно ожидаемого максимального числа
+worker-потоков во всем кластере. Не страшно, если партиций больше, чем потоков: один worker может
+владеть и обрабатывать несколько партиций. Запас по партициям позволяет позже добавлять worker'ы без
+изменения `partition-count`.
+
+Изменять `partition-count` в уже работающей очереди нельзя без отдельной миграционной процедуры:
+`partition_num` вычисляется как `hash(partition_key) % partition_count + 1`, поэтому новые задачи
+того же ключа могут начать попадать в другую партицию, пока старые еще остаются в прежней.
 
 ## Диаграмма последовательности
 
@@ -284,6 +310,22 @@ erDiagram
         created_at timestamptz
     }
 
+    task_queue_dead_letter {
+        task_id uuid PK
+        task_type varchar_128
+        payload text
+        partition_key varchar_512
+        partition_num int
+        delay_count bigint
+        attempt_count bigint
+        failed_worker_id varchar_100
+        reason varchar_64
+        error_class varchar_512
+        error_message text
+        original_created_at timestamptz
+        dead_lettered_at timestamptz
+    }
+
     task_worker_registry ||--o{ task_worker_partition_assignment : "worker_id (ON DELETE CASCADE)"
     task_worker_registry ||--o{ task_worker_partition_assignment : "pending_worker_id (ON DELETE SET NULL)"
     task_worker_registry ||--o{ task_queue : "worker_id (ON DELETE SET NULL)"
@@ -330,6 +372,7 @@ high-churn таблицы (частые `insert`/`update`/`delete`).
 | `task_queue`                       | Успешное завершение задачи (ack)                        | `TaskExecutionService.handleAndAcknowledge()` или `TaskQueueService.acknowledge()`                                   | owner-checked `delete` строки задачи по `task_id` + `worker_id`                                                                                                                               |
 | `task_queue`                       | Retry после ошибки                                      | `TaskRetryService.retryOrFinalize()` -> `TaskQueueRepository.delayOwnedBy()`                                         | owner-checked `update`: `available_at = now + backoff`, `delay_count = delay_count + 1`, `worker_id = null`                                                                                   |
 | `task_queue`                       | Финализация без retry (non-retryable или лимит попыток) | `TaskRetryService.retryOrFinalize()` -> `TaskQueueRepository.removeOwnedBy()`                                        | owner-checked `delete` строки задачи по `task_id` + `worker_id`                                                                                                                               |
+| `task_queue_dead_letter`           | Архивация финализированной задачи                       | `TaskRetryService.retryOrFinalize()` -> `TaskQueueRepository.deadLetterOwnedBy()`                                    | если `dead-letter-enabled=true`: owner-checked copy задачи с причиной финализации и последней ошибкой                                                                                         |
 | `task_queue`                       | Освобождение захваченных задач при удалении воркера     | `WorkerCoordinationService.unregisterWorker()/cleanUpDeadWorkers()` -> `TaskQueueRepository.releaseLockedByWorker()` | `update`: `worker_id = null` для задач удаляемого воркера                                                                                                                                     |
 | `task_queue`                       | Удаление воркера из реестра                             | FK `worker_id -> task_worker_registry.worker_id` (`ON DELETE SET NULL`)                                              | Автоматический `update`: `worker_id = null` в связанных задачах                                                                                                                               |
 

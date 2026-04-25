@@ -8,7 +8,7 @@
 | `TaskQueueService`          | `dequeueForWorker(...)`         | `@Transactional`                                | shared advisory lock + lock/update пачки задач                                |
 | `TaskQueueService`          | `acknowledge(taskId, workerId)` | `@Transactional`                                | owner-checked delete задачи из `task_queue`                                   |
 | `TaskExecutionService`      | `handleAndAcknowledge(...)`     | `@Transactional(rollbackFor = Exception.class)` | `handler.handle(...)` + owner-checked `acknowledge(...)` в одной транзакции   |
-| `TaskRetryService`          | `retryOrFinalize(..., workerId)` | `@Transactional`                               | owner-checked классификация + `delay(...)` или `remove(...)`                  |
+| `TaskRetryService`          | `retryOrFinalize(..., workerId)` | `@Transactional`                               | owner-checked классификация + `delay(...)`, `remove(...)` или dead-letter copy |
 | `WorkerCoordinationService` | `registerWorker(...)`           | `@Transactional`                                | insert worker + rebalance                                                     |
 | `WorkerCoordinationService` | `heartbeatWorker(...)`          | `@Transactional`                                | update `heartbeat_last`                                                       |
 | `WorkerCoordinationService` | `unregisterWorker(...)`         | `@Transactional`                                | release locked tasks + remove worker + rebalance                              |
@@ -23,6 +23,8 @@
 - Режим `task.queue.handling-transaction-mode=NON_TRANSACTIONAL` отключает общую транзакцию
   `handler+ack` и оставляет только транзакцию на `ack`.
 - Репозитории предполагают вызов внутри сервисных транзакций.
+- Если `task.queue.dead-letter-enabled=true`, копирование в `task_queue_dead_letter` и удаление из
+  `task_queue` выполняются в одной транзакции и с той же owner-check проверкой.
 - Для согласованности выборки/ребаланса используется связка advisory lock:
     - `dequeueForWorker(...)` -> `pg_advisory_xact_lock_shared(...)`;
     - `rebalanceInternal()` / `reconcileHandoffs()` -> `pg_advisory_xact_lock(...)`.
