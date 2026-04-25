@@ -1,8 +1,9 @@
 package dev.verkhovskiy.taskqueue.service;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -11,6 +12,7 @@ import dev.verkhovskiy.taskqueue.config.HandoffTimeoutAction;
 import dev.verkhovskiy.taskqueue.config.TaskQueueProperties;
 import dev.verkhovskiy.taskqueue.metrics.TaskQueueMetrics;
 import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository;
+import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository.QueueStateMetrics;
 import dev.verkhovskiy.taskqueue.persistence.WorkerRegistryRepository;
 import java.time.Clock;
 import java.time.Duration;
@@ -45,7 +47,8 @@ class WorkerCoordinationServiceTest {
     properties.setHandoffDrainTimeout(Duration.ofSeconds(30));
     properties.setHandoffTimeoutAction(HandoffTimeoutAction.EXTEND);
 
-    doAnswer(
+    lenient()
+        .doAnswer(
             invocation -> {
               TaskQueueMetrics.RebalanceCallable<?> callable = invocation.getArgument(0);
               callable.call();
@@ -142,5 +145,28 @@ class WorkerCoordinationServiceTest {
         .extendDrainDeadline(1, NOW.plus(properties.getHandoffDrainTimeout()));
     verify(workerRegistryRepository, never()).cancelDraining(1);
     verify(workerRegistryRepository, never()).completeHandoff(eq(1), eq("w2"), any());
+  }
+
+  @Test
+  void cleansUpExpiredTaskLeases() {
+    when(queueRepository.releaseExpiredTaskLeases(properties.getCleanupBatchSize())).thenReturn(3);
+
+    int released = service.cleanUpExpiredTaskLeases();
+
+    assertEquals(3, released);
+    verify(metrics).expiredTaskLeasesReleased(3);
+  }
+
+  @Test
+  void refreshesQueueStateMetrics() {
+    QueueStateMetrics snapshot = new QueueStateMetrics(10, 2, 30, 5);
+    when(queueRepository.loadQueueStateMetrics()).thenReturn(snapshot);
+    when(queueRepository.loadPartitionLagMetrics(properties.getPartitionCount()))
+        .thenReturn(List.of());
+
+    service.refreshQueueStateMetrics();
+
+    verify(metrics).setQueueState(snapshot);
+    verify(metrics).setPartitionLag(List.of());
   }
 }

@@ -7,6 +7,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import dev.verkhovskiy.taskqueue.config.TaskQueueProperties;
+import dev.verkhovskiy.taskqueue.metrics.TaskQueueMetrics;
 import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository;
 import dev.verkhovskiy.taskqueue.retry.RetryBackoffDecision;
 import dev.verkhovskiy.taskqueue.retry.RetryBackoffPolicy;
@@ -28,6 +29,7 @@ class TaskRetryServiceTest {
   @Mock private TaskQueueRepository queueRepository;
   @Mock private RetryBackoffPolicy retryBackoffPolicy;
   @Mock private RetryExceptionClassifier retryExceptionClassifier;
+  @Mock private TaskQueueMetrics metrics;
 
   private TaskQueueProperties properties;
   private Clock clock;
@@ -39,7 +41,12 @@ class TaskRetryServiceTest {
     clock = Clock.fixed(Instant.parse("2026-01-01T10:00:00Z"), ZoneOffset.UTC);
     service =
         new TaskRetryService(
-            queueRepository, retryBackoffPolicy, retryExceptionClassifier, properties, clock);
+            queueRepository,
+            retryBackoffPolicy,
+            retryExceptionClassifier,
+            properties,
+            metrics,
+            clock);
   }
 
   @Test
@@ -54,6 +61,7 @@ class TaskRetryServiceTest {
 
     assertEquals(decision, actual);
     verify(queueRepository).delayOwnedBy(taskId, "worker-1", Instant.parse("2026-01-01T10:00:05Z"));
+    verify(metrics).retryScheduled();
   }
 
   @Test
@@ -67,6 +75,7 @@ class TaskRetryServiceTest {
 
     assertEquals(RetryBackoffDecision.nonRetryable(4), actual);
     verify(queueRepository).removeOwnedBy(taskId, "worker-1");
+    verify(metrics).nonRetryable();
     verify(retryBackoffPolicy, never()).nextRetry(anyLong());
   }
 
@@ -90,6 +99,8 @@ class TaskRetryServiceTest {
             "bad payload",
             clock.instant());
     verify(queueRepository, never()).removeOwnedBy(taskId, "worker-1");
+    verify(metrics).nonRetryable();
+    verify(metrics).deadLettered();
   }
 
   @Test
@@ -105,5 +116,7 @@ class TaskRetryServiceTest {
     verify(queueRepository)
         .deadLetterOwnedBy(taskId, "worker-1", "RETRY_EXHAUSTED", null, null, clock.instant());
     verify(queueRepository, never()).removeOwnedBy(taskId, "worker-1");
+    verify(metrics).retryExhausted();
+    verify(metrics).deadLettered();
   }
 }

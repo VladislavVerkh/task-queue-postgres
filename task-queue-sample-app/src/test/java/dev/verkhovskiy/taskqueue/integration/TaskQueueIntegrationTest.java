@@ -10,6 +10,7 @@ import dev.verkhovskiy.taskqueue.domain.QueuedTask;
 import dev.verkhovskiy.taskqueue.exception.TaskOwnershipLostException;
 import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository;
 import dev.verkhovskiy.taskqueue.sample.TaskQueueSampleApplication;
+import dev.verkhovskiy.taskqueue.service.TaskDeadLetterService;
 import dev.verkhovskiy.taskqueue.service.TaskQueueService;
 import dev.verkhovskiy.taskqueue.service.TaskRetryService;
 import dev.verkhovskiy.taskqueue.service.WorkerCoordinationService;
@@ -63,6 +64,8 @@ class TaskQueueIntegrationTest {
   @Autowired private TaskQueueRepository queueRepository;
 
   @Autowired private TaskRetryService retryService;
+
+  @Autowired private TaskDeadLetterService deadLetterService;
 
   @Autowired private NamedParameterJdbcTemplate jdbc;
 
@@ -163,6 +166,63 @@ class TaskQueueIntegrationTest {
   }
 
   @Test
+  void expiredTaskLeaseIsReleasedAndStaleWorkerCannotAcknowledge() {
+    workerCoordinationService.registerWorker(P1W1);
+
+    UUID taskId = UUID.randomUUID();
+    Instant now = Instant.now();
+    queueRepository.enqueue(taskId, "integration-test", "{}", "k", 1, now, now);
+
+    List<QueuedTask> lockedTasks = queueService.dequeueForWorker(P1W1, 1);
+    assertEquals(1, lockedTasks.size());
+    assertEquals(taskId, lockedTasks.getFirst().taskId());
+
+    Map<String, Object> lockedRow =
+        jdbc.queryForMap(
+            "select worker_id, locked_at, lease_until from task_queue where task_id = :taskId",
+            new MapSqlParameterSource("taskId", taskId));
+    assertEquals(P1W1, lockedRow.get("worker_id"));
+    assertTrue(lockedRow.get("locked_at") != null);
+    assertTrue(lockedRow.get("lease_until") != null);
+
+    expireTaskLease(taskId);
+    int released = workerCoordinationService.cleanUpExpiredTaskLeases();
+    assertEquals(1, released);
+
+    Map<String, Object> releasedRow =
+        jdbc.queryForMap(
+            "select worker_id, locked_at, lease_until from task_queue where task_id = :taskId",
+            new MapSqlParameterSource("taskId", taskId));
+    assertNull(releasedRow.get("worker_id"));
+    assertNull(releasedRow.get("locked_at"));
+    assertNull(releasedRow.get("lease_until"));
+    assertThrows(TaskOwnershipLostException.class, () -> queueService.acknowledge(taskId, P1W1));
+  }
+
+  @Test
+  void workerCanRenewOnlyOwnedTaskLease() {
+    workerCoordinationService.registerWorker(P1W1);
+
+    UUID taskId = UUID.randomUUID();
+    Instant now = Instant.now();
+    queueRepository.enqueue(taskId, "integration-test", "{}", "k", 1, now, now);
+
+    List<QueuedTask> lockedTasks = queueService.dequeueForWorker(P1W1, 1);
+    assertEquals(1, lockedTasks.size());
+    expireTaskLease(taskId);
+
+    queueService.renewLease(taskId, P1W1);
+
+    Boolean renewed =
+        jdbc.queryForObject(
+            "select lease_until > now() + interval '4 minutes' from task_queue where task_id = :taskId",
+            new MapSqlParameterSource("taskId", taskId),
+            Boolean.class);
+    assertTrue(Boolean.TRUE.equals(renewed));
+    assertThrows(TaskOwnershipLostException.class, () -> queueService.renewLease(taskId, P2W1));
+  }
+
+  @Test
   void staleWorkerCannotDelayTaskAlreadyOwnedByAnotherWorker() {
     workerCoordinationService.registerWorker(P1W1);
     workerCoordinationService.registerWorker(P2W1);
@@ -236,6 +296,79 @@ class TaskQueueIntegrationTest {
   }
 
   @Test
+  void deadLetterTaskCanBeRequeued() {
+    workerCoordinationService.registerWorker(P1W1);
+
+    UUID taskId = UUID.randomUUID();
+    Instant now = Instant.now();
+    queueRepository.enqueue(taskId, "integration-test", "{}", "k", 1, now, now);
+
+    List<QueuedTask> lockedTasks = queueService.dequeueForWorker(P1W1, 1);
+    assertEquals(1, lockedTasks.size());
+    retryService.retryOrFinalize(
+        taskId, lockedTasks.getFirst().delayCount(), new IllegalArgumentException("bad"), P1W1);
+
+    assertTrue(deadLetterService.requeue(taskId));
+
+    Integer queueRows =
+        jdbc.queryForObject(
+            "select count(*) from task_queue where task_id = :taskId",
+            new MapSqlParameterSource("taskId", taskId),
+            Integer.class);
+    Integer deadLetterRows =
+        jdbc.queryForObject(
+            "select count(*) from task_queue_dead_letter where task_id = :taskId",
+            new MapSqlParameterSource("taskId", taskId),
+            Integer.class);
+    assertEquals(1, queueRows);
+    assertEquals(0, deadLetterRows);
+  }
+
+  @Test
+  void deadLetterRetentionDeletesOldRows() {
+    UUID taskId = UUID.randomUUID();
+    jdbc.update(
+        """
+            insert into task_queue_dead_letter(
+                task_id,
+                task_type,
+                payload,
+                partition_key,
+                partition_num,
+                delay_count,
+                attempt_count,
+                failed_worker_id,
+                reason,
+                original_created_at,
+                dead_lettered_at
+            )
+            values(
+                :taskId,
+                'integration-test',
+                '{}',
+                'k',
+                1,
+                0,
+                1,
+                :workerId,
+                'NON_RETRYABLE',
+                now() - interval '10 days',
+                now() - interval '10 days'
+            )
+            """,
+        new MapSqlParameterSource().addValue("taskId", taskId).addValue("workerId", P1W1));
+
+    assertEquals(1, deadLetterService.deleteOlderThan(Instant.now().minusSeconds(86_400), 100));
+
+    Integer deadLetterRows =
+        jdbc.queryForObject(
+            "select count(*) from task_queue_dead_letter where task_id = :taskId",
+            new MapSqlParameterSource("taskId", taskId),
+            Integer.class);
+    assertEquals(0, deadLetterRows);
+  }
+
+  @Test
   void failoverOfWholeSecondPodRebalancesToFirstPodThreads() {
     workerCoordinationService.registerWorker(P1W1);
     workerCoordinationService.registerWorker(P1W2);
@@ -272,6 +405,16 @@ class TaskQueueIntegrationTest {
              where task_id = :taskId
             """,
         new MapSqlParameterSource().addValue("taskId", taskId).addValue("workerId", workerId));
+  }
+
+  private void expireTaskLease(UUID taskId) {
+    jdbc.update(
+        """
+            update task_queue
+               set lease_until = now() - interval '1 second'
+             where task_id = :taskId
+            """,
+        new MapSqlParameterSource("taskId", taskId));
   }
 
   private List<Integer> loadAssignedPartitionsOfSecondPodFirstWorker() {

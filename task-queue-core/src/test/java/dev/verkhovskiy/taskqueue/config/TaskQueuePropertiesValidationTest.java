@@ -68,6 +68,39 @@ class TaskQueuePropertiesValidationTest {
   }
 
   @Test
+  void rejectsNonPositiveTaskLeaseTimeout() {
+    TaskQueueProperties properties = new TaskQueueProperties();
+    properties.setTaskLeaseTimeout(Duration.ZERO);
+
+    Set<ConstraintViolation<TaskQueueProperties>> violations = validate(properties);
+
+    assertEquals(1, violations.size());
+    assertEquals("taskLeaseTimeout", violations.iterator().next().getPropertyPath().toString());
+  }
+
+  @Test
+  void rejectsNonPositiveShutdownTimeout() {
+    TaskQueueProperties properties = new TaskQueueProperties();
+    properties.setShutdownTimeout(Duration.ZERO);
+
+    Set<ConstraintViolation<TaskQueueProperties>> violations = validate(properties);
+
+    assertEquals(1, violations.size());
+    assertEquals("shutdownTimeout", violations.iterator().next().getPropertyPath().toString());
+  }
+
+  @Test
+  void rejectsNonPositiveQueueMetricsInterval() {
+    TaskQueueProperties properties = new TaskQueueProperties();
+    properties.setQueueMetricsInterval(Duration.ZERO);
+
+    Set<ConstraintViolation<TaskQueueProperties>> violations = validate(properties);
+
+    assertEquals(1, violations.size());
+    assertEquals("queueMetricsInterval", violations.iterator().next().getPropertyPath().toString());
+  }
+
+  @Test
   void rejectsNonPositiveHandoffReconcileInterval() {
     TaskQueueProperties properties = new TaskQueueProperties();
     properties.setHandoffReconcileInterval(Duration.ZERO);
