@@ -7,12 +7,15 @@
 | `TaskQueueService`          | `enqueue(...)`                  | `@Transactional`                                | расчет партиции + insert в `task_queue`                                       |
 | `TaskQueueService`          | `dequeueForWorker(...)`         | `@Transactional`                                | shared advisory lock + lock/update пачки задач                                |
 | `TaskQueueService`          | `acknowledge(taskId, workerId)` | `@Transactional`                                | owner-checked delete задачи из `task_queue`                                   |
+| `TaskQueueService`          | `renewLease(taskId, workerId)`  | `@Transactional`                                | owner-checked продление `lease_until` in-flight задачи                        |
 | `TaskExecutionService`      | `handleAndAcknowledge(...)`     | `@Transactional(rollbackFor = Exception.class)` | `handler.handle(...)` + owner-checked `acknowledge(...)` в одной транзакции   |
 | `TaskRetryService`          | `retryOrFinalize(..., workerId)` | `@Transactional`                               | owner-checked классификация + `delay(...)`, `remove(...)` или dead-letter copy |
 | `WorkerCoordinationService` | `registerWorker(...)`           | `@Transactional`                                | insert worker + rebalance                                                     |
 | `WorkerCoordinationService` | `heartbeatWorker(...)`          | `@Transactional`                                | update `heartbeat_last`                                                       |
 | `WorkerCoordinationService` | `unregisterWorker(...)`         | `@Transactional`                                | release locked tasks + remove worker + rebalance                              |
 | `WorkerCoordinationService` | `cleanUpDeadWorkers()`          | `@Transactional`                                | выборка dead workers (`FOR UPDATE SKIP LOCKED`) + release/remove + rebalance  |
+| `WorkerCoordinationService` | `cleanUpExpiredTaskLeases()`    | `@Transactional`                                | выборка задач с истекшим lease (`FOR UPDATE SKIP LOCKED`) + release ownership |
+| `WorkerCoordinationService` | `refreshQueueStateMetrics()`    | `@Transactional(readOnly = true)`               | aggregate-запрос состояния очереди для gauge-метрик                           |
 | `WorkerCoordinationService` | `rebalance()`                   | `@Transactional`                                | полный rebalance под exclusive advisory lock                                  |
 | `WorkerCoordinationService` | `reconcileHandoffs()`           | `@Transactional`                                | reconcile `DRAINING` assignments + timeout-policy под exclusive advisory lock |
 

@@ -43,7 +43,8 @@
 2. каждый worker регистрируется в `task_worker_registry`;
 3. при регистрации вызывается ребаланс партиций;
 4. для каждого worker запускается heartbeat-монитор;
-5. отдельный cleanup-цикл периодически удаляет «мертвые» воркеры и триггерит ребаланс;
+5. отдельный cleanup-цикл периодически освобождает задачи с истекшим lease, удаляет «мертвые»
+   воркеры и триггерит ребаланс;
 6. в том же фоне периодически выполняется reconcile handoff-состояний (`DRAINING`), чтобы
    завершать/откатывать зависшие переназначения партиций по timeout-policy.
 
@@ -54,7 +55,8 @@
 1. Worker вызывает `TaskQueueService.dequeueForWorker(workerId, batchSize)`.
 2. Выборка идет только из партиций, закрепленных за worker в состоянии `ACTIVE`.
    Партиции в состоянии `DRAINING` не отдают новые задачи старому владельцу.
-3. SQL использует `FOR UPDATE SKIP LOCKED` для конкурентной выборки без конфликтов.
+3. SQL использует `FOR UPDATE SKIP LOCKED` для конкурентной выборки без конфликтов и выставляет
+   `locked_at`/`lease_until` для защиты от зависших in-flight задач.
 4. Режим обработки выбирается свойством `task.queue.handling-transaction-mode`:
     - `TRANSACTIONAL`: Worker вызывает `TaskExecutionService.handleAndAcknowledge(task, workerId)`,
       где `handler.handle(task)` и owner-checked `acknowledge(taskId, workerId)` идут в одной
@@ -66,6 +68,20 @@
     - retryable: либо `delay(...)`, либо удалить при исчерпании попыток;
     - если `task.queue.dead-letter-enabled=true`, финализированная задача перед удалением
       копируется в `task_queue_dead_letter`.
+
+### Lease и падение JVM
+
+При захвате задачи worker получает lease на `task.queue.task-lease-timeout`. Пока обработчик
+работает, runtime периодически продлевает `lease_until`. Если JVM падает, задачи остаются
+закрепленными за старым `worker_id` до cleanup: «мертвый» worker удаляется после heartbeat timeout,
+а его задачи освобождаются. Если JVM жива, но обработчик завис и не продлевает lease, отдельный
+cleanup освобождает задачу после истечения `lease_until`; stale worker после этого не сможет удалить
+задачу из-за owner-check.
+
+Эта модель сохраняет `at-least-once` семантику: после crash/timeout задача может быть выполнена
+повторно, поэтому обработчики должны быть идемпотентными или использовать бизнес-idempotency key.
+`task.queue.task-lease-timeout` должен быть достаточно большим, чтобы выдерживать кратковременные
+паузы GC/БД между продлениями lease.
 
 ### Гарантия порядка и retry
 
@@ -307,6 +323,8 @@ erDiagram
         available_at timestamptz
         delay_count bigint
         worker_id varchar_100 FK
+        locked_at timestamptz
+        lease_until timestamptz
         created_at timestamptz
     }
 
@@ -341,6 +359,7 @@ DDL лежит в Liquibase changeset:
 - `task-queue-jdbc/src/main/resources/db/changelog/db.changelog-master.yaml`
 - `task-queue-jdbc/src/main/resources/db/changelog/changes/001-task-queue-init.sql`
 - `task-queue-jdbc/src/main/resources/db/changelog/changes/005-partition-handoff-state.sql`
+- `task-queue-jdbc/src/main/resources/db/changelog/changes/007-task-queue-task-lease.sql`
 
 Для таблиц `task_queue`, `task_worker_registry` и `task_worker_partition_assignment`
 заданы более агрессивные per-table параметры autovacuum/analyze, так как это
@@ -368,12 +387,16 @@ high-churn таблицы (частые `insert`/`update`/`delete`).
 | `task_worker_partition_assignment` | Удаление воркера из реестра                             | FK `worker_id -> task_worker_registry.worker_id` (`ON DELETE CASCADE`)                                               | Автоматический `delete` дочерних assignments этого воркера                                                                                                                                    |
 | `task_worker_partition_assignment` | Удаление pending owner из реестра                       | FK `pending_worker_id -> task_worker_registry.worker_id` (`ON DELETE SET NULL`)                                      | Автоматический `update`: `pending_worker_id = null`                                                                                                                                           |
 | `task_queue`                       | Постановка задачи                                       | `TaskQueueService.enqueue()` -> `TaskQueueRepository.enqueue()`                                                      | `insert`: `task_id`, `task_type`, `payload`, `partition_key`, `partition_num`, `available_at`, `delay_count=0`, `worker_id=null`, `created_at=now`                                            |
-| `task_queue`                       | Захват задач воркером на обработку                      | `TaskQueueService.dequeueForWorker()` -> `TaskQueueRepository.lockNextTasksForWorker()`                              | `update`: `worker_id = :workerId` для выбранных задач                                                                                                                                         |
+| `task_queue`                       | Захват задач воркером на обработку                      | `TaskQueueService.dequeueForWorker()` -> `TaskQueueRepository.lockNextTasksForWorker()`                              | `update`: `worker_id = :workerId`, `locked_at = db_now`, `lease_until = db_now + taskLeaseTimeout` для выбранных задач                                                                        |
+| `task_queue`                       | Продление lease in-flight задачи                        | `TaskQueueService.renewLease()` -> `TaskQueueRepository.renewLeaseOwnedBy()`                                         | owner-checked `update`: `lease_until = db_now + taskLeaseTimeout`                                                                                                                             |
 | `task_queue`                       | Успешное завершение задачи (ack)                        | `TaskExecutionService.handleAndAcknowledge()` или `TaskQueueService.acknowledge()`                                   | owner-checked `delete` строки задачи по `task_id` + `worker_id`                                                                                                                               |
-| `task_queue`                       | Retry после ошибки                                      | `TaskRetryService.retryOrFinalize()` -> `TaskQueueRepository.delayOwnedBy()`                                         | owner-checked `update`: `available_at = now + backoff`, `delay_count = delay_count + 1`, `worker_id = null`                                                                                   |
+| `task_queue`                       | Retry после ошибки                                      | `TaskRetryService.retryOrFinalize()` -> `TaskQueueRepository.delayOwnedBy()`                                         | owner-checked `update`: `available_at = now + backoff`, `delay_count = delay_count + 1`, `worker_id = null`, lease-поля очищены                                                               |
 | `task_queue`                       | Финализация без retry (non-retryable или лимит попыток) | `TaskRetryService.retryOrFinalize()` -> `TaskQueueRepository.removeOwnedBy()`                                        | owner-checked `delete` строки задачи по `task_id` + `worker_id`                                                                                                                               |
 | `task_queue_dead_letter`           | Архивация финализированной задачи                       | `TaskRetryService.retryOrFinalize()` -> `TaskQueueRepository.deadLetterOwnedBy()`                                    | если `dead-letter-enabled=true`: owner-checked copy задачи с причиной финализации и последней ошибкой                                                                                         |
-| `task_queue`                       | Освобождение захваченных задач при удалении воркера     | `WorkerCoordinationService.unregisterWorker()/cleanUpDeadWorkers()` -> `TaskQueueRepository.releaseLockedByWorker()` | `update`: `worker_id = null` для задач удаляемого воркера                                                                                                                                     |
+| `task_queue_dead_letter`           | Requeue из DLQ                                          | `TaskDeadLetterService.requeue()` -> `TaskQueueRepository.requeueDeadLetter()`                                       | атомарный перенос записи из `task_queue_dead_letter` обратно в `task_queue` с `delay_count=0`, без потери DLQ-записи при конфликте `task_id`                                                   |
+| `task_queue_dead_letter`           | Retention cleanup                                       | `TaskDeadLetterService.deleteExpired()` -> `TaskQueueRepository.deleteDeadLettersOlderThan()`                        | при `dead-letter-retention > 0`: batch-удаление DLQ-записей старше retention                                                                                                                   |
+| `task_queue`                       | Освобождение задач с истекшим lease                     | `WorkerCoordinationService.cleanUpExpiredTaskLeases()` -> `TaskQueueRepository.releaseExpiredTaskLeases()`           | `update`: `worker_id = null`, lease-поля очищены для задач, у которых `lease_until < db_now`                                                                                                  |
+| `task_queue`                       | Освобождение захваченных задач при удалении воркера     | `WorkerCoordinationService.unregisterWorker()/cleanUpDeadWorkers()` -> `TaskQueueRepository.releaseLockedByWorker()` | `update`: `worker_id = null`, lease-поля очищены для задач удаляемого воркера                                                                                                                 |
 | `task_queue`                       | Удаление воркера из реестра                             | FK `worker_id -> task_worker_registry.worker_id` (`ON DELETE SET NULL`)                                              | Автоматический `update`: `worker_id = null` в связанных задачах                                                                                                                               |
 
 ## Метрики
@@ -383,7 +406,12 @@ high-churn таблицы (частые `insert`/`update`/`delete`).
 - `register.success`, `register.failure`
 - `heartbeat.success`, `heartbeat.failure`, `heartbeat.timeout`, `heartbeat.not_found`,
   `heartbeat.latency`
-- `cleanup.runs`, `cleanup.removed`
+- `cleanup.runs`, `cleanup.removed`, `cleanup.expired_task_leases.released`
+- `tasks.ready`, `tasks.in_flight`, `tasks.oldest_ready_age.seconds`,
+  `tasks.oldest_in_flight_age.seconds`
+- `tasks.retry.scheduled`, `tasks.retry.exhausted`, `tasks.non_retryable`,
+  `tasks.dead_lettered`, `tasks.dead_letter.deleted`, `tasks.dead_letter.requeued`
+- `partition.ready{partition="N"}`, `partition.oldest_ready_age.seconds{partition="N"}`
 - `rebalance.runs`, `rebalance.failures`, `rebalance.latency`
 - `handoff.started`, `handoff.completed`, `handoff.cancelled`
 - `handoff.timeout`, `handoff.timeout.extended`, `handoff.timeout.aborted`, `handoff.timeout.forced`
