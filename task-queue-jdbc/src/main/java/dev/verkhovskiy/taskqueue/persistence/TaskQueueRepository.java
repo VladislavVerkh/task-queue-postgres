@@ -2,7 +2,8 @@ package dev.verkhovskiy.taskqueue.persistence;
 
 import dev.verkhovskiy.taskqueue.config.TaskQueueBeanNames;
 import dev.verkhovskiy.taskqueue.domain.QueuedTask;
-import dev.verkhovskiy.taskqueue.exception.TaskNotFoundException;
+import dev.verkhovskiy.taskqueue.exception.TaskOwnershipLostException;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -16,6 +17,10 @@ import org.springframework.stereotype.Repository;
 
 /** Репозиторий операций над таблицей очереди задач. */
 @Repository
+@SuppressFBWarnings(
+    value = "EI_EXPOSE_REP2",
+    justification =
+        "Spring JdbcTemplate is an injected infrastructure bean owned by the container.")
 public class TaskQueueRepository {
 
   private static final DataClassRowMapper<QueuedTask> QUEUED_TASK_ROW_MAPPER =
@@ -123,29 +128,35 @@ public class TaskQueueRepository {
   }
 
   /**
-   * Удаляет задачу из очереди.
+   * Удаляет задачу только если она все еще закреплена за ожидаемым воркером.
    *
    * @param taskId идентификатор задачи
-   * @throws TaskNotFoundException если задача не найдена
+   * @param workerId идентификатор воркера-владельца
+   * @throws TaskOwnershipLostException если задача отсутствует или закреплена за другим воркером
    */
-  public void remove(UUID taskId) {
+  public void removeOwnedBy(UUID taskId, String workerId) {
     int updated =
         jdbc.update(
-            "delete from task_queue where task_id = :taskId",
-            new MapSqlParameterSource("taskId", taskId));
+            """
+            delete from task_queue
+             where task_id = :taskId
+               and worker_id = :workerId
+            """,
+            new MapSqlParameterSource().addValue("taskId", taskId).addValue("workerId", workerId));
     if (updated == 0) {
-      throw new TaskNotFoundException(taskId);
+      throw new TaskOwnershipLostException(taskId, workerId);
     }
   }
 
   /**
-   * Переносит задачу на повторную попытку и освобождает ее от текущего воркера.
+   * Переносит задачу на повторную попытку только если она все еще закреплена за ожидаемым воркером.
    *
    * @param taskId идентификатор задачи
+   * @param workerId идентификатор воркера-владельца
    * @param availableAt время следующей доступности задачи
-   * @throws TaskNotFoundException если задача не найдена
+   * @throws TaskOwnershipLostException если задача отсутствует или закреплена за другим воркером
    */
-  public void delay(UUID taskId, Instant availableAt) {
+  public void delayOwnedBy(UUID taskId, String workerId, Instant availableAt) {
     int updated =
         jdbc.update(
             """
@@ -154,12 +165,14 @@ public class TaskQueueRepository {
                    delay_count = delay_count + 1,
                    worker_id = null
              where task_id = :taskId
+               and worker_id = :workerId
             """,
             new MapSqlParameterSource()
                 .addValue("taskId", taskId)
+                .addValue("workerId", workerId)
                 .addValue("availableAt", toOffsetDateTime(availableAt)));
     if (updated == 0) {
-      throw new TaskNotFoundException(taskId);
+      throw new TaskOwnershipLostException(taskId, workerId);
     }
   }
 

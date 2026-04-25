@@ -56,10 +56,11 @@
    Партиции в состоянии `DRAINING` не отдают новые задачи старому владельцу.
 3. SQL использует `FOR UPDATE SKIP LOCKED` для конкурентной выборки без конфликтов.
 4. Режим обработки выбирается свойством `task.queue.handling-transaction-mode`:
-    - `TRANSACTIONAL`: Worker вызывает `TaskExecutionService.handleAndAcknowledge(task)`, где
-      `handler.handle(task)` и `acknowledge(taskId)` идут в одной транзакции;
+    - `TRANSACTIONAL`: Worker вызывает `TaskExecutionService.handleAndAcknowledge(task, workerId)`,
+      где `handler.handle(task)` и owner-checked `acknowledge(taskId, workerId)` идут в одной
+      транзакции;
     - `NON_TRANSACTIONAL`: Worker выполняет `handler.handle(task)` вне общей транзакции, затем
-      вызывает `acknowledge(taskId)` отдельной транзакцией.
+      вызывает owner-checked `acknowledge(taskId, workerId)` отдельной транзакцией.
 5. После отката при ошибке вызывается `TaskRetryService.retryOrFinalize(...)`:
     - non-retryable: удалить задачу;
     - retryable: либо `delay(...)`, либо удалить при исчерпании попыток.
@@ -98,15 +99,15 @@ sequenceDiagram
         TQS -->> W: tasks batch
 
         alt handled successfully
-            W ->> TES: handleAndAcknowledge(task)
+            W ->> TES: handleAndAcknowledge(task, workerId)
             TES ->> DB: BEGIN TX
             TES ->> TES: handler.handle(task)
-            TES ->> TQS: acknowledge(taskId)
+            TES ->> TQS: acknowledge(taskId, workerId)
             TQS ->> DB: DELETE FROM task_queue WHERE task_id=?
             TES ->> DB: COMMIT TX
         else handler failed
             TES ->> DB: ROLLBACK TX
-            W ->> RS: retryOrFinalize(taskId, delayCount, error)
+            W ->> RS: retryOrFinalize(taskId, delayCount, error, workerId)
             alt retryable and attempts left
                 RS ->> DB: UPDATE available_at(backoff), delay_count
             else non-retryable or retry limit reached
@@ -326,9 +327,9 @@ high-churn таблицы (частые `insert`/`update`/`delete`).
 | `task_worker_partition_assignment` | Удаление pending owner из реестра                       | FK `pending_worker_id -> task_worker_registry.worker_id` (`ON DELETE SET NULL`)                                      | Автоматический `update`: `pending_worker_id = null`                                                                                                                                           |
 | `task_queue`                       | Постановка задачи                                       | `TaskQueueService.enqueue()` -> `TaskQueueRepository.enqueue()`                                                      | `insert`: `task_id`, `task_type`, `payload`, `partition_key`, `partition_num`, `available_at`, `delay_count=0`, `worker_id=null`, `created_at=now`                                            |
 | `task_queue`                       | Захват задач воркером на обработку                      | `TaskQueueService.dequeueForWorker()` -> `TaskQueueRepository.lockNextTasksForWorker()`                              | `update`: `worker_id = :workerId` для выбранных задач                                                                                                                                         |
-| `task_queue`                       | Успешное завершение задачи (ack)                        | `TaskExecutionService.handleAndAcknowledge()` или `TaskQueueService.acknowledge()`                                   | `delete` строки задачи                                                                                                                                                                        |
-| `task_queue`                       | Retry после ошибки                                      | `TaskRetryService.retryOrFinalize()` -> `TaskQueueRepository.delay()`                                                | `update`: `available_at = now + backoff`, `delay_count = delay_count + 1`, `worker_id = null`                                                                                                 |
-| `task_queue`                       | Финализация без retry (non-retryable или лимит попыток) | `TaskRetryService.retryOrFinalize()` -> `TaskQueueRepository.remove()`                                               | `delete` строки задачи                                                                                                                                                                        |
+| `task_queue`                       | Успешное завершение задачи (ack)                        | `TaskExecutionService.handleAndAcknowledge()` или `TaskQueueService.acknowledge()`                                   | owner-checked `delete` строки задачи по `task_id` + `worker_id`                                                                                                                               |
+| `task_queue`                       | Retry после ошибки                                      | `TaskRetryService.retryOrFinalize()` -> `TaskQueueRepository.delayOwnedBy()`                                         | owner-checked `update`: `available_at = now + backoff`, `delay_count = delay_count + 1`, `worker_id = null`                                                                                   |
+| `task_queue`                       | Финализация без retry (non-retryable или лимит попыток) | `TaskRetryService.retryOrFinalize()` -> `TaskQueueRepository.removeOwnedBy()`                                        | owner-checked `delete` строки задачи по `task_id` + `worker_id`                                                                                                                               |
 | `task_queue`                       | Освобождение захваченных задач при удалении воркера     | `WorkerCoordinationService.unregisterWorker()/cleanUpDeadWorkers()` -> `TaskQueueRepository.releaseLockedByWorker()` | `update`: `worker_id = null` для задач удаляемого воркера                                                                                                                                     |
 | `task_queue`                       | Удаление воркера из реестра                             | FK `worker_id -> task_worker_registry.worker_id` (`ON DELETE SET NULL`)                                              | Автоматический `update`: `worker_id = null` в связанных задачах                                                                                                                               |
 

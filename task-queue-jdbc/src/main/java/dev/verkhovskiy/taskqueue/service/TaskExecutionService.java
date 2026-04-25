@@ -22,23 +22,28 @@ public class TaskExecutionService {
   private final TaskQueueService taskQueueService;
 
   /**
-   * Выполняет обработчик задачи и подтверждает выполнение в рамках одной транзакции.
+   * Выполняет обработчик задачи и подтверждает выполнение, проверяя текущего владельца задачи.
    *
    * <p>При любой ошибке (включая checked-исключения) транзакция откатывается.
    *
    * @param task задача из очереди
+   * @param workerId идентификатор воркера-владельца
    * @throws Exception ошибка бизнес-обработки
    */
   @Transactional(
       transactionManager = TaskQueueBeanNames.TRANSACTION_MANAGER,
       rollbackFor = Exception.class)
-  public void handleAndAcknowledge(QueuedTask task) throws Exception {
+  public void handleAndAcknowledge(QueuedTask task, String workerId) throws Exception {
+    handle(task);
+    taskQueueService.acknowledge(task.taskId(), workerId);
+  }
+
+  private void handle(QueuedTask task) throws Exception {
     TaskHandler handler =
         handlerRegistry
             .findByType(task.taskType())
             .orElseThrow(
                 () -> new IllegalStateException("No task handler for type " + task.taskType()));
     handler.handle(task);
-    taskQueueService.acknowledge(task.taskId());
   }
 }

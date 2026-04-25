@@ -71,12 +71,20 @@ public class TaskQueueService {
   }
 
   /**
-   * Подтверждает успешную обработку задачи и удаляет ее из очереди.
+   * Подтверждает успешную обработку задачи только если задача все еще закреплена за воркером.
    *
    * @param taskId идентификатор задачи
+   * @param workerId идентификатор воркера-владельца
    */
   @Transactional(transactionManager = TaskQueueBeanNames.TRANSACTION_MANAGER)
-  public void acknowledge(UUID taskId) {
-    queueRepository.remove(taskId);
+  public void acknowledge(UUID taskId, String workerId) {
+    requireWorkerId(workerId);
+    queueRepository.removeOwnedBy(taskId, workerId);
+  }
+
+  private static void requireWorkerId(String workerId) {
+    if (workerId == null || workerId.isBlank()) {
+      throw new IllegalArgumentException("workerId must be set");
+    }
   }
 }

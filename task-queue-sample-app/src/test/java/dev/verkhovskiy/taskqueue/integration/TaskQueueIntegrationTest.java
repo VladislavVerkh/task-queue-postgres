@@ -3,12 +3,15 @@ package dev.verkhovskiy.taskqueue.integration;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.verkhovskiy.taskqueue.domain.QueuedTask;
+import dev.verkhovskiy.taskqueue.exception.TaskOwnershipLostException;
 import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository;
 import dev.verkhovskiy.taskqueue.sample.TaskQueueSampleApplication;
 import dev.verkhovskiy.taskqueue.service.TaskQueueService;
+import dev.verkhovskiy.taskqueue.service.TaskRetryService;
 import dev.verkhovskiy.taskqueue.service.WorkerCoordinationService;
 import dev.verkhovskiy.taskqueue.testkit.TaskQueuePostgresContainerSupport;
 import java.time.Instant;
@@ -56,6 +59,8 @@ class TaskQueueIntegrationTest {
   @Autowired private TaskQueueService queueService;
 
   @Autowired private TaskQueueRepository queueRepository;
+
+  @Autowired private TaskRetryService retryService;
 
   @Autowired private NamedParameterJdbcTemplate jdbc;
 
@@ -129,6 +134,55 @@ class TaskQueueIntegrationTest {
   }
 
   @Test
+  void staleWorkerCannotAcknowledgeTaskAfterCleanupReleasedOwnership() {
+    workerCoordinationService.registerWorker(P1W1);
+
+    UUID taskId = UUID.randomUUID();
+    Instant now = Instant.now();
+    queueRepository.enqueue(taskId, "integration-test", "{}", "k", 1, now, now);
+
+    List<QueuedTask> lockedTasks = queueService.dequeueForWorker(P1W1, 1);
+    assertEquals(1, lockedTasks.size());
+    assertEquals(taskId, lockedTasks.getFirst().taskId());
+
+    markWorkerAsDead(P1W1);
+    int cleaned = workerCoordinationService.cleanUpDeadWorkers();
+    assertEquals(1, cleaned);
+
+    assertThrows(TaskOwnershipLostException.class, () -> queueService.acknowledge(taskId, P1W1));
+
+    Integer remaining =
+        jdbc.queryForObject(
+            "select count(*) from task_queue where task_id = :taskId",
+            new MapSqlParameterSource("taskId", taskId),
+            Integer.class);
+    assertEquals(1, remaining);
+  }
+
+  @Test
+  void staleWorkerCannotDelayTaskAlreadyOwnedByAnotherWorker() {
+    workerCoordinationService.registerWorker(P1W1);
+    workerCoordinationService.registerWorker(P2W1);
+
+    UUID taskId = UUID.randomUUID();
+    Instant now = Instant.now();
+    queueRepository.enqueue(taskId, "integration-test", "{}", "k", 1, now, now);
+    setTaskOwner(taskId, P2W1);
+    RuntimeException failure = new RuntimeException("boom");
+
+    assertThrows(
+        TaskOwnershipLostException.class,
+        () -> retryService.retryOrFinalize(taskId, 0, failure, P1W1));
+
+    Map<String, Object> row =
+        jdbc.queryForMap(
+            "select worker_id, delay_count from task_queue where task_id = :taskId",
+            new MapSqlParameterSource("taskId", taskId));
+    assertEquals(P2W1, row.get("worker_id"));
+    assertEquals(0L, row.get("delay_count"));
+  }
+
+  @Test
   void failoverOfWholeSecondPodRebalancesToFirstPodThreads() {
     workerCoordinationService.registerWorker(P1W1);
     workerCoordinationService.registerWorker(P1W2);
@@ -155,6 +209,16 @@ class TaskQueueIntegrationTest {
              where worker_id = :workerId
             """,
         new MapSqlParameterSource("workerId", workerId));
+  }
+
+  private void setTaskOwner(UUID taskId, String workerId) {
+    jdbc.update(
+        """
+            update task_queue
+               set worker_id = :workerId
+             where task_id = :taskId
+            """,
+        new MapSqlParameterSource().addValue("taskId", taskId).addValue("workerId", workerId));
   }
 
   private List<Integer> loadAssignedPartitionsOfSecondPodFirstWorker() {

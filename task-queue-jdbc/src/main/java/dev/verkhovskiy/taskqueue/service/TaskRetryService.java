@@ -23,47 +23,53 @@ public class TaskRetryService {
   private final Clock clock;
 
   /**
-   * Выполняет retry-or-finalize логику на основе фактической ошибки обработки.
+   * Выполняет retry-or-finalize, проверяя что задача все еще закреплена за ожидаемым воркером.
    *
    * @param taskId идентификатор задачи
    * @param alreadyRetriedCount количество уже выполненных retry
    * @param failure ошибка обработки
+   * @param workerId идентификатор воркера-владельца
    * @return решение о следующем шаге обработки
    */
   @Transactional(transactionManager = TaskQueueBeanNames.TRANSACTION_MANAGER)
   public RetryBackoffDecision retryOrFinalize(
-      UUID taskId, long alreadyRetriedCount, Throwable failure) {
+      UUID taskId, long alreadyRetriedCount, Throwable failure, String workerId) {
+    requireWorkerId(workerId);
     if (!retryExceptionClassifier.isRetryable(failure)) {
-      queueRepository.remove(taskId);
+      queueRepository.removeOwnedBy(taskId, workerId);
       return RetryBackoffDecision.nonRetryable(nextAttempt(alreadyRetriedCount));
     }
-    return retryRetryableTask(taskId, alreadyRetriedCount);
+    return retryRetryableTask(taskId, alreadyRetriedCount, workerId);
   }
 
   /**
-   * Выполняет retry-or-finalize без классификации ошибки.
+   * Выполняет retry-or-finalize без классификации ошибки, проверяя текущего владельца задачи.
    *
    * <p>Метод полезен для вызовов, где retry заведомо разрешен.
    *
    * @param taskId идентификатор задачи
    * @param alreadyRetriedCount количество уже выполненных retry
+   * @param workerId идентификатор воркера-владельца
    * @return решение о следующем шаге обработки
    */
   @SuppressWarnings("unused")
   @Transactional(transactionManager = TaskQueueBeanNames.TRANSACTION_MANAGER)
-  public RetryBackoffDecision retryOrFinalize(UUID taskId, long alreadyRetriedCount) {
-    return retryRetryableTask(taskId, alreadyRetriedCount);
+  public RetryBackoffDecision retryOrFinalize(
+      UUID taskId, long alreadyRetriedCount, String workerId) {
+    requireWorkerId(workerId);
+    return retryRetryableTask(taskId, alreadyRetriedCount, workerId);
   }
 
-  private RetryBackoffDecision retryRetryableTask(UUID taskId, long alreadyRetriedCount) {
+  private RetryBackoffDecision retryRetryableTask(
+      UUID taskId, long alreadyRetriedCount, String workerId) {
     RetryBackoffDecision decision = retryBackoffPolicy.nextRetry(alreadyRetriedCount);
     if (decision.shouldRetry()) {
       Instant availableAt = clock.instant().plusMillis(decision.delayMillis());
-      queueRepository.delay(taskId, availableAt);
+      queueRepository.delayOwnedBy(taskId, workerId, availableAt);
       return decision;
     }
 
-    queueRepository.remove(taskId);
+    queueRepository.removeOwnedBy(taskId, workerId);
     return decision;
   }
 
@@ -76,5 +82,11 @@ public class TaskRetryService {
   private static int nextAttempt(long alreadyRetriedCount) {
     long value = alreadyRetriedCount == Long.MAX_VALUE ? Long.MAX_VALUE : alreadyRetriedCount + 1;
     return value > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) value;
+  }
+
+  private static void requireWorkerId(String workerId) {
+    if (workerId == null || workerId.isBlank()) {
+      throw new IllegalArgumentException("workerId must be set");
+    }
   }
 }

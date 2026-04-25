@@ -4,6 +4,7 @@ import dev.verkhovskiy.taskqueue.config.TaskHandlingTransactionMode;
 import dev.verkhovskiy.taskqueue.config.TaskQueueProperties;
 import dev.verkhovskiy.taskqueue.config.UnregistrationAction;
 import dev.verkhovskiy.taskqueue.domain.QueuedTask;
+import dev.verkhovskiy.taskqueue.exception.TaskOwnershipLostException;
 import dev.verkhovskiy.taskqueue.exception.WorkerRegistrationAlreadyExistsException;
 import dev.verkhovskiy.taskqueue.exception.WorkerRegistrationNotFoundException;
 import dev.verkhovskiy.taskqueue.handler.TaskHandler;
@@ -20,6 +21,7 @@ import java.net.UnknownHostException;
 import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -65,6 +67,7 @@ public class QueueWorkerRuntime {
   private final TaskQueueMetrics metrics;
   private final AtomicBoolean running = new AtomicBoolean(false);
   private final AtomicBoolean destroyTriggered = new AtomicBoolean(false);
+  private final List<Future<?>> runtimeTasks = new CopyOnWriteArrayList<>();
   private final long pid = ProcessHandle.current().pid();
   private final String host = resolveHost();
 
@@ -78,6 +81,7 @@ public class QueueWorkerRuntime {
       return;
     }
 
+    runtimeTasks.clear();
     int workerThreadCount = properties.getWorkerCount() + 1;
     workerExecutor =
         Executors.newFixedThreadPool(
@@ -99,8 +103,9 @@ public class QueueWorkerRuntime {
             });
 
     IntStream.range(0, properties.getWorkerCount())
-        .forEach(workerIndex -> workerExecutor.submit(() -> workerLoop(workerIndex)));
-    workerExecutor.submit(this::cleanupLoop);
+        .forEach(
+            workerIndex -> runtimeTasks.add(workerExecutor.submit(() -> workerLoop(workerIndex))));
+    runtimeTasks.add(workerExecutor.submit(this::cleanupLoop));
   }
 
   /** Останавливает все фоновые executors при завершении приложения. */
@@ -168,7 +173,7 @@ public class QueueWorkerRuntime {
               || session.shouldStopApplication()) {
             break;
           }
-          processTask(task);
+          processTask(session.workerId(), task);
         }
       } catch (RuntimeException e) {
         log.error("Worker {} loop failed", workerIndex, e);
@@ -189,21 +194,29 @@ public class QueueWorkerRuntime {
   /**
    * Выполняет обработку одной задачи с подтверждением либо retry/finalize при ошибке.
    *
+   * @param workerId идентификатор воркера-владельца
    * @param task задача из очереди
    */
-  private void processTask(QueuedTask task) {
+  private void processTask(String workerId, QueuedTask task) {
     try {
       if (properties.getHandlingTransactionMode() == TaskHandlingTransactionMode.TRANSACTIONAL) {
-        taskExecutionService.handleAndAcknowledge(task);
+        taskExecutionService.handleAndAcknowledge(task, workerId);
       } else {
-        processTaskNonTransactional(task);
+        processTaskNonTransactional(workerId, task);
       }
+    } catch (TaskOwnershipLostException e) {
+      log.warn("Task {} ownership lost by worker {}, skipping ack/retry", task.taskId(), workerId);
     } catch (Exception e) {
       log.error("Task {} failed, taskType={}", task.taskId(), task.taskType(), e);
       try {
         RetryBackoffDecision retryDecision =
-            retryService.retryOrFinalize(task.taskId(), task.delayCount(), e);
+            retryService.retryOrFinalize(task.taskId(), task.delayCount(), e, workerId);
         logRetryDecision(task, retryDecision, e);
+      } catch (TaskOwnershipLostException ownershipLost) {
+        log.warn(
+            "Task {} ownership lost by worker {}, skipping retry/finalize",
+            task.taskId(),
+            workerId);
       } catch (RuntimeException retryError) {
         log.error("Failed to schedule retry for task {}", task.taskId(), retryError);
       }
@@ -214,19 +227,20 @@ public class QueueWorkerRuntime {
    * Выполняет обработку задачи без общей транзакции с подтверждением.
    *
    * <p>Хэндлер выполняется вне транзакции библиотеки, подтверждение делается отдельной транзакцией
-   * через {@link TaskQueueService#acknowledge(UUID)}.
+   * через {@link TaskQueueService#acknowledge(UUID, String)}.
    *
+   * @param workerId идентификатор воркера-владельца
    * @param task задача из очереди
    * @throws Exception ошибка бизнес-обработки
    */
-  private void processTaskNonTransactional(QueuedTask task) throws Exception {
+  private void processTaskNonTransactional(String workerId, QueuedTask task) throws Exception {
     TaskHandler handler =
         handlerRegistry
             .findByType(task.taskType())
             .orElseThrow(
                 () -> new IllegalStateException("No task handler for type " + task.taskType()));
     handler.handle(task);
-    queueService.acknowledge(task.taskId());
+    queueService.acknowledge(task.taskId(), workerId);
   }
 
   /**

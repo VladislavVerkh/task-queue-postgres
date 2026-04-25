@@ -6,10 +6,9 @@
 |-----------------------------|---------------------------------|-------------------------------------------------|-------------------------------------------------------------------------------|
 | `TaskQueueService`          | `enqueue(...)`                  | `@Transactional`                                | расчет партиции + insert в `task_queue`                                       |
 | `TaskQueueService`          | `dequeueForWorker(...)`         | `@Transactional`                                | shared advisory lock + lock/update пачки задач                                |
-| `TaskQueueService`          | `acknowledge(...)`              | `@Transactional`                                | delete задачи из `task_queue`                                                 |
-| `TaskExecutionService`      | `handleAndAcknowledge(...)`     | `@Transactional(rollbackFor = Exception.class)` | `handler.handle(...)` + `acknowledge(...)` в одной транзакции                 |
-| `TaskRetryService`          | `retryOrFinalize(..., failure)` | `@Transactional`                                | классификация + `delay(...)` или `remove(...)`                                |
-| `TaskRetryService`          | `retryOrFinalize(...)`          | `@Transactional`                                | `delay(...)` или `remove(...)`                                                |
+| `TaskQueueService`          | `acknowledge(taskId, workerId)` | `@Transactional`                                | owner-checked delete задачи из `task_queue`                                   |
+| `TaskExecutionService`      | `handleAndAcknowledge(...)`     | `@Transactional(rollbackFor = Exception.class)` | `handler.handle(...)` + owner-checked `acknowledge(...)` в одной транзакции   |
+| `TaskRetryService`          | `retryOrFinalize(..., workerId)` | `@Transactional`                               | owner-checked классификация + `delay(...)` или `remove(...)`                  |
 | `WorkerCoordinationService` | `registerWorker(...)`           | `@Transactional`                                | insert worker + rebalance                                                     |
 | `WorkerCoordinationService` | `heartbeatWorker(...)`          | `@Transactional`                                | update `heartbeat_last`                                                       |
 | `WorkerCoordinationService` | `unregisterWorker(...)`         | `@Transactional`                                | release locked tasks + remove worker + rebalance                              |
