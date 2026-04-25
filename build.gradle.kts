@@ -1,5 +1,7 @@
 import com.diffplug.gradle.spotless.SpotlessExtension
 import org.gradle.api.plugins.JavaPlugin
+import org.gradle.api.tasks.javadoc.Javadoc
+import org.gradle.external.javadoc.StandardJavadocDocletOptions
 import org.gradle.testing.jacoco.tasks.JacocoReport
 import org.owasp.dependencycheck.gradle.extension.DependencyCheckExtension
 
@@ -79,8 +81,13 @@ subprojects {
             }
         }
 
+        tasks.withType<Javadoc>().configureEach {
+            (options as StandardJavadocDocletOptions).addBooleanOption("Xdoclint:all,-missing", true)
+        }
+
         tasks.withType<Test>().configureEach {
             useJUnitPlatform()
+            jvmArgs("-Xshare:off")
             finalizedBy("jacocoTestReport")
         }
 
