@@ -3,13 +3,25 @@ package dev.verkhovskiy.taskqueue.retry;
 import dev.verkhovskiy.taskqueue.config.RetryBackoffStrategy;
 import dev.verkhovskiy.taskqueue.config.TaskQueueProperties;
 import io.github.resilience4j.core.IntervalFunction;
+import java.util.Objects;
 import org.springframework.stereotype.Component;
 
 /** Политика расчета backoff-задержки и лимита попыток retry. */
 @Component
-public record RetryBackoffPolicy(TaskQueueProperties properties) {
+public class RetryBackoffPolicy {
 
   private static final long MIN_DELAY_MILLIS = 1;
+
+  private final TaskQueueProperties properties;
+
+  /**
+   * Создает политику retry на основе task-queue properties.
+   *
+   * @param properties параметры очереди задач
+   */
+  public RetryBackoffPolicy(TaskQueueProperties properties) {
+    this.properties = Objects.requireNonNull(properties, "properties");
+  }
 
   /**
    * Рассчитывает решение о следующей попытке обработки.

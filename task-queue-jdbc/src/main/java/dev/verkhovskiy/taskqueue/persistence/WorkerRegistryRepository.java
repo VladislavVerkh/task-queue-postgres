@@ -3,6 +3,7 @@ package dev.verkhovskiy.taskqueue.persistence;
 import dev.verkhovskiy.taskqueue.config.TaskQueueBeanNames;
 import dev.verkhovskiy.taskqueue.exception.WorkerRegistrationAlreadyExistsException;
 import dev.verkhovskiy.taskqueue.exception.WorkerRegistrationNotFoundException;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -20,6 +21,9 @@ import org.springframework.stereotype.Repository;
 
 /** Репозиторий операций по регистрации воркеров и закреплению партиций. */
 @Repository
+@SuppressFBWarnings(
+    value = "EI_EXPOSE_REP2",
+    justification = "Spring JdbcTemplate collaborators are injected infrastructure beans.")
 public class WorkerRegistryRepository {
 
   private final NamedParameterJdbcTemplate jdbc;
@@ -411,9 +415,7 @@ public class WorkerRegistryRepository {
       Instant drainStartedAt,
       Instant drainDeadlineAt) {
 
-    /**
-     * @return {@code true}, если партиция находится в DRAINING.
-     */
+    /** Возвращает {@code true}, если партиция находится в DRAINING. */
     public boolean draining() {
       return handoffState == HandoffState.DRAINING;
     }
