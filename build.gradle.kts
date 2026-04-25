@@ -1,6 +1,7 @@
 import com.diffplug.gradle.spotless.SpotlessExtension
 import org.gradle.api.plugins.JavaPlugin
 import org.gradle.testing.jacoco.tasks.JacocoReport
+import org.owasp.dependencycheck.gradle.extension.DependencyCheckExtension
 
 plugins {
     id("org.springframework.boot") version "4.0.3" apply false
@@ -8,8 +9,8 @@ plugins {
     id("com.diffplug.spotless") version "7.2.1" apply false
     id("com.github.spotbugs") version "6.5.1" apply false
     id("net.ltgt.errorprone") version "5.1.0" apply false
-    id("org.owasp.dependencycheck") version "12.2.1"
-    id("org.cyclonedx.bom") version "3.2.4"
+    id("org.owasp.dependencycheck") version "12.2.1" apply false
+    id("org.cyclonedx.bom") version "3.2.4" apply false
 }
 
 group = "dev.verkhovskiy"
@@ -21,20 +22,41 @@ allprojects {
     }
 }
 
-dependencyCheck {
-    formats = listOf("HTML", "JSON")
-    failBuildOnCVSS = 7.0f
-    analyzers.assemblyEnabled = false
-}
+val securityTaskNames =
+    setOf(
+        "securityCheck",
+        "cyclonedxBom",
+        "dependencyCheckAggregate",
+        "dependencyCheckAnalyze",
+        "dependencyCheckUpdate",
+    )
 
-tasks.named("cyclonedxBom") {
-    mustRunAfter("dependencyCheckAggregate")
+val securityChecksRequested =
+    gradle.startParameter.taskNames
+        .map { it.substringAfterLast(":") }
+        .any(securityTaskNames::contains)
+
+if (securityChecksRequested) {
+    apply(plugin = "org.owasp.dependencycheck")
+    apply(plugin = "org.cyclonedx.bom")
+
+    extensions.configure<DependencyCheckExtension>("dependencyCheck") {
+        formats = listOf("HTML", "JSON")
+        failBuildOnCVSS = 7.0f
+        analyzers.assemblyEnabled = false
+    }
+
+    tasks.named("cyclonedxBom") {
+        mustRunAfter("dependencyCheckAggregate")
+    }
 }
 
 tasks.register("securityCheck") {
     group = "verification"
     description = "Runs dependency vulnerability scanning and generates a CycloneDX SBOM."
-    dependsOn("dependencyCheckAggregate", "cyclonedxBom")
+    if (securityChecksRequested) {
+        dependsOn("dependencyCheckAggregate", "cyclonedxBom")
+    }
 }
 
 subprojects {
