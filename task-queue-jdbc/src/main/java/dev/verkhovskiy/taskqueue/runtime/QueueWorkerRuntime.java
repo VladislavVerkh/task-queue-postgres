@@ -68,6 +68,7 @@ public class QueueWorkerRuntime implements SmartLifecycle {
   private final TaskHandlerRegistry handlerRegistry;
   private final TaskExecutionService taskExecutionService;
   private final TaskQueueMetrics metrics;
+  private final TaskQueueRuntimeShutdownStrategy shutdownStrategy;
   private final AtomicBoolean running = new AtomicBoolean(false);
   private final AtomicBoolean destroyTriggered = new AtomicBoolean(false);
   private final List<Future<?>> runtimeTasks = new CopyOnWriteArrayList<>();
@@ -478,8 +479,9 @@ public class QueueWorkerRuntime implements SmartLifecycle {
     if (!destroyTriggered.compareAndSet(false, true)) {
       return;
     }
+    running.set(false);
     log.error(message, cause);
-    Runtime.getRuntime().halt(exitCode);
+    shutdownStrategy.shutdown(exitCode, message, cause);
   }
 
   /**

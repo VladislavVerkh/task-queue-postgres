@@ -17,7 +17,7 @@
 | `task.queue.heartbeat-deviation`                   | `Duration`     | Допустимое отклонение heartbeat при cleanup                       | `3s`                  | `>= 0`                                        |
 | `task.queue.dead-process-timeout-multiplier`       | `int`          | Множитель к timeout воркера при определении dead worker           | `3`                   | `> 0`                                         |
 | `task.queue.unregistration-action`                 | `enum`         | Действие при проблемах регистрации/heartbeat                      | `REREGISTER`          | `STOP` / `REREGISTER`                         |
-| `task.queue.stop-application-on-heartbeat-timeout` | `boolean`      | Принудительно останавливать JVM при heartbeat timeout             | `false`               | `true/false`                                  |
+| `task.queue.stop-application-on-heartbeat-timeout` | `boolean`      | Запрашивать остановку приложения при heartbeat timeout            | `false`               | `true/false`                                  |
 | `task.queue.cleanup-interval`                      | `Duration`     | Интервал запуска cleanup dead workers                             | `1s`                  | `>= 1ms`                                      |
 | `task.queue.queue-metrics-interval`                | `Duration`     | Интервал обновления aggregate gauge-метрик очереди                | `10s`                 | `>= 1ms`                                      |
 | `task.queue.shutdown-timeout`                      | `Duration`     | Сколько ждать завершения in-flight задач при shutdown             | `20s`                 | `>= 1ms`                                      |

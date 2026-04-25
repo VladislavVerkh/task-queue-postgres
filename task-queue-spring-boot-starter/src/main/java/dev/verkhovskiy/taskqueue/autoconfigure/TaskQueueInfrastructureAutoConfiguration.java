@@ -2,6 +2,7 @@ package dev.verkhovskiy.taskqueue.autoconfigure;
 
 import dev.verkhovskiy.taskqueue.config.TaskQueueBeanNames;
 import dev.verkhovskiy.taskqueue.config.TaskQueueProperties;
+import dev.verkhovskiy.taskqueue.runtime.TaskQueueRuntimeShutdownStrategy;
 import dev.verkhovskiy.taskqueue.service.TaskIdGenerator;
 import dev.verkhovskiy.taskqueue.service.UuidV7TaskIdGenerator;
 import java.time.Clock;
@@ -14,7 +15,9 @@ import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.config.BeanFactoryPostProcessor;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
+import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.AliasRegistry;
@@ -113,6 +116,26 @@ public class TaskQueueInfrastructureAutoConfiguration {
   @ConditionalOnMissingBean(TaskIdGenerator.class)
   public TaskIdGenerator taskIdGenerator() {
     return new UuidV7TaskIdGenerator();
+  }
+
+  /**
+   * Создает стратегию graceful shutdown для фатальных ошибок runtime очереди.
+   *
+   * <p>Остановка контекста выполняется в отдельном потоке, чтобы не блокировать lifecycle shutdown
+   * ожиданием worker-потока, который инициировал ошибку.
+   */
+  @Bean
+  @ConditionalOnMissingBean(TaskQueueRuntimeShutdownStrategy.class)
+  public TaskQueueRuntimeShutdownStrategy taskQueueRuntimeShutdownStrategy(
+      ConfigurableApplicationContext applicationContext) {
+    return (exitCode, message, cause) -> {
+      Thread shutdownThread =
+          new Thread(
+              () -> SpringApplication.exit(applicationContext, () -> exitCode),
+              "task-queue-runtime-shutdown");
+      shutdownThread.setDaemon(false);
+      shutdownThread.start();
+    };
   }
 
   /**
