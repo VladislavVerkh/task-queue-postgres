@@ -115,6 +115,40 @@ class TaskQueueInfrastructureAutoConfigurationTest {
             });
   }
 
+  @Test
+  void failsFastWhenDataSourceAliasIsAmbiguous() {
+    new ApplicationContextRunner()
+        .withConfiguration(AutoConfigurations.of(TaskQueueInfrastructureAutoConfiguration.class))
+        .withUserConfiguration(AmbiguousDataSourceConfiguration.class)
+        .run(
+            context -> {
+              assertThat(context).hasFailed();
+              assertThat(rootCause(context.getStartupFailure()))
+                  .isInstanceOf(IllegalStateException.class)
+                  .hasMessageContaining(
+                      "Ambiguous beans for task-queue alias '"
+                          + TaskQueueBeanNames.DATA_SOURCE
+                          + "'");
+            });
+  }
+
+  @Test
+  void failsFastWhenTransactionManagerAliasIsAmbiguous() {
+    new ApplicationContextRunner()
+        .withConfiguration(AutoConfigurations.of(TaskQueueInfrastructureAutoConfiguration.class))
+        .withUserConfiguration(AmbiguousTransactionManagerConfiguration.class)
+        .run(
+            context -> {
+              assertThat(context).hasFailed();
+              assertThat(rootCause(context.getStartupFailure()))
+                  .isInstanceOf(IllegalStateException.class)
+                  .hasMessageContaining(
+                      "Ambiguous beans for task-queue alias '"
+                          + TaskQueueBeanNames.TRANSACTION_MANAGER
+                          + "'");
+            });
+  }
+
   private static Throwable rootCause(Throwable failure) {
     Throwable result = failure;
     while (result.getCause() != null) {
@@ -133,6 +167,55 @@ class TaskQueueInfrastructureAutoConfigurationTest {
 
     @Bean
     PlatformTransactionManager transactionManager(DataSource dataSource) {
+      return new DataSourceTransactionManager(dataSource);
+    }
+
+    @Bean
+    TaskQueueProperties taskQueueProperties() {
+      return new TaskQueueProperties();
+    }
+  }
+
+  @Configuration(proxyBeanMethods = false)
+  static class AmbiguousDataSourceConfiguration {
+
+    @Bean
+    DataSource firstDataSource() {
+      return new DriverManagerDataSource();
+    }
+
+    @Bean
+    DataSource secondDataSource() {
+      return new DriverManagerDataSource();
+    }
+
+    @Bean
+    PlatformTransactionManager transactionManager(
+        @Qualifier("firstDataSource") DataSource firstDataSource) {
+      return new DataSourceTransactionManager(firstDataSource);
+    }
+
+    @Bean
+    TaskQueueProperties taskQueueProperties() {
+      return new TaskQueueProperties();
+    }
+  }
+
+  @Configuration(proxyBeanMethods = false)
+  static class AmbiguousTransactionManagerConfiguration {
+
+    @Bean
+    DataSource dataSource() {
+      return new DriverManagerDataSource();
+    }
+
+    @Bean
+    PlatformTransactionManager firstTransactionManager(DataSource dataSource) {
+      return new DataSourceTransactionManager(dataSource);
+    }
+
+    @Bean
+    PlatformTransactionManager secondTransactionManager(DataSource dataSource) {
       return new DataSourceTransactionManager(dataSource);
     }
 

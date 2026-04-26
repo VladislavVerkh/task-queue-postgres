@@ -10,6 +10,7 @@ import dev.verkhovskiy.taskqueue.domain.TaskEnqueueRequest;
 import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository;
 import dev.verkhovskiy.taskqueue.persistence.WorkerRegistryRepository;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -37,6 +38,26 @@ class TaskQueueServiceTest {
   }
 
   @Test
+  void rejectsNullRequestBeforeSql() {
+    assertThatThrownBy(() -> queueService.enqueue(null))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("request must be set");
+
+    verifyNoInteractions(queueRepository, partitioner, taskIdGenerator);
+  }
+
+  @Test
+  void rejectsBlankTaskTypeBeforeSql() {
+    TaskEnqueueRequest request = new TaskEnqueueRequest("  ", "key", "{}", null);
+
+    assertThatThrownBy(() -> queueService.enqueue(request))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("taskType must be set");
+
+    verifyNoInteractions(queueRepository, partitioner, taskIdGenerator);
+  }
+
+  @Test
   void rejectsTooLongTaskTypeBeforeSql() {
     TaskEnqueueRequest request = new TaskEnqueueRequest("x".repeat(129), "key", "{}", null);
 
@@ -54,6 +75,29 @@ class TaskQueueServiceTest {
     assertThatThrownBy(() -> queueService.enqueue(request))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessage("partitionKey length must be <= 512");
+
+    verifyNoInteractions(queueRepository, partitioner, taskIdGenerator);
+  }
+
+  @Test
+  void rejectsNullPayloadBeforeSql() {
+    TaskEnqueueRequest request = new TaskEnqueueRequest("type", "key", null, null);
+
+    assertThatThrownBy(() -> queueService.enqueue(request))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("payload must be set");
+
+    verifyNoInteractions(queueRepository, partitioner, taskIdGenerator);
+  }
+
+  @Test
+  void rejectsAvailableAtAndAvailableAfterTogetherBeforeSql() {
+    TaskEnqueueRequest request =
+        new TaskEnqueueRequest("type", "key", "{}", Instant.parse("2026-04-26T12:00:00Z"));
+
+    assertThatThrownBy(() -> queueService.enqueue(request, Duration.ofSeconds(1)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("availableAt and availableAfter cannot both be set");
 
     verifyNoInteractions(queueRepository, partitioner, taskIdGenerator);
   }
