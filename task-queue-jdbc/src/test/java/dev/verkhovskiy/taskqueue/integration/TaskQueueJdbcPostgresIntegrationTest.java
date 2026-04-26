@@ -22,13 +22,17 @@ import dev.verkhovskiy.taskqueue.service.TaskDeadLetterService;
 import dev.verkhovskiy.taskqueue.service.TaskExecutionService;
 import dev.verkhovskiy.taskqueue.service.TaskIdGenerator;
 import dev.verkhovskiy.taskqueue.service.TaskPartitioner;
+import dev.verkhovskiy.taskqueue.service.TaskProducer;
+import dev.verkhovskiy.taskqueue.service.TaskProducerService;
 import dev.verkhovskiy.taskqueue.service.TaskQueuePartitionGuard;
 import dev.verkhovskiy.taskqueue.service.TaskQueueService;
 import dev.verkhovskiy.taskqueue.service.TaskRetryService;
 import dev.verkhovskiy.taskqueue.service.UuidV7TaskIdGenerator;
 import dev.verkhovskiy.taskqueue.service.WorkerCoordinationService;
 import dev.verkhovskiy.taskqueue.testkit.TaskQueuePostgresContainerSupport;
+import java.time.Duration;
 import java.time.Instant;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -51,6 +55,7 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -86,9 +91,11 @@ class TaskQueueJdbcPostgresIntegrationTest {
   @Autowired private TaskQueueService queueService;
   @Autowired private TaskRetryService retryService;
   @Autowired private TaskDeadLetterService deadLetterService;
+  @Autowired private TaskProducer taskProducer;
   @Autowired private TaskQueueRepository queueRepository;
   @Autowired private TaskQueueMetadataRepository metadataRepository;
   @Autowired private NamedParameterJdbcTemplate jdbc;
+  @Autowired private PlatformTransactionManager transactionManager;
 
   @BeforeEach
   void cleanTables() {
@@ -169,6 +176,64 @@ class TaskQueueJdbcPostgresIntegrationTest {
   }
 
   @Test
+  void enqueueDelayedDurationUsesCurrentDatabaseClockOnPostgres() {
+    Duration delay = Duration.ofSeconds(5);
+
+    DelayClockProbe probe =
+        new TransactionTemplate(transactionManager)
+            .execute(
+                status -> {
+                  Instant transactionStartedAt = transactionTimestamp();
+                  sleep(Duration.ofMillis(400));
+                  Instant beforeOperation = databaseClock();
+
+                  UUID taskId =
+                      taskProducer.enqueueDelayed(
+                          "integration-test", "db-clock-delayed", "{}", delay);
+
+                  return new DelayClockProbe(
+                      transactionStartedAt,
+                      beforeOperation,
+                      databaseClock(),
+                      availableAt(taskId),
+                      delay.toMillis());
+                });
+
+    assertUsesOperationDatabaseClock(probe);
+  }
+
+  @Test
+  void retryDelayUsesCurrentDatabaseClockOnPostgres() {
+    workerCoordinationService.registerWorker(WORKER_ID);
+    UUID taskId = enqueueTask("retry-db-clock", 1, Instant.now());
+    List<QueuedTask> tasks = queueService.dequeueForWorker(WORKER_ID, 1);
+    assertEquals(1, tasks.size());
+
+    DelayClockProbe probe =
+        new TransactionTemplate(transactionManager)
+            .execute(
+                status -> {
+                  Instant transactionStartedAt = transactionTimestamp();
+                  sleep(Duration.ofMillis(400));
+                  Instant beforeOperation = databaseClock();
+
+                  long delayMillis =
+                      retryService
+                          .retryOrFinalize(taskId, 0, new RuntimeException("boom"), WORKER_ID)
+                          .delayMillis();
+
+                  return new DelayClockProbe(
+                      transactionStartedAt,
+                      beforeOperation,
+                      databaseClock(),
+                      availableAt(taskId),
+                      delayMillis);
+                });
+
+    assertUsesOperationDatabaseClock(probe);
+  }
+
+  @Test
   void partitionCountGuardPersistsMetadataInPostgres() {
     assertEquals("2", metadataRepository.findValue("partition-count").orElseThrow());
   }
@@ -212,6 +277,51 @@ class TaskQueueJdbcPostgresIntegrationTest {
             new MapSqlParameterSource("taskId", taskId),
             Boolean.class);
     return Boolean.TRUE.equals(result);
+  }
+
+  private Instant availableAt(UUID taskId) {
+    OffsetDateTime value =
+        jdbc.queryForObject(
+            "select available_at from task_queue where task_id = :taskId",
+            new MapSqlParameterSource("taskId", taskId),
+            OffsetDateTime.class);
+    return value.toInstant();
+  }
+
+  private Instant databaseClock() {
+    return queryInstant("select clock_timestamp()");
+  }
+
+  private Instant transactionTimestamp() {
+    return queryInstant("select transaction_timestamp()");
+  }
+
+  private Instant queryInstant(String sql) {
+    OffsetDateTime value =
+        jdbc.queryForObject(sql, new MapSqlParameterSource(), OffsetDateTime.class);
+    return value.toInstant();
+  }
+
+  private static void assertUsesOperationDatabaseClock(DelayClockProbe probe) {
+    Instant earliestExpected = probe.beforeOperation().plusMillis(probe.delayMillis());
+    Instant latestExpected = probe.afterOperation().plusMillis(probe.delayMillis());
+    assertFalse(probe.availableAt().isBefore(earliestExpected));
+    assertFalse(probe.availableAt().isAfter(latestExpected));
+
+    long elapsedSinceTransactionStartMillis =
+        Duration.between(
+                probe.transactionStartedAt(), probe.availableAt().minusMillis(probe.delayMillis()))
+            .toMillis();
+    assertTrue(elapsedSinceTransactionStartMillis >= 300);
+  }
+
+  private static void sleep(Duration duration) {
+    try {
+      Thread.sleep(duration.toMillis());
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new IllegalStateException("Interrupted while waiting for database clock drift", e);
+    }
   }
 
   private void insertOldDeadLetter(UUID taskId) {
@@ -264,6 +374,7 @@ class TaskQueueJdbcPostgresIntegrationTest {
     TaskQueuePartitionGuard.class,
     TaskQueueService.class,
     TaskExecutionService.class,
+    TaskProducerService.class,
     TaskRetryService.class,
     TaskDeadLetterService.class,
     WorkerCoordinationService.class
@@ -291,4 +402,11 @@ class TaskQueueJdbcPostgresIntegrationTest {
       return new UuidV7TaskIdGenerator();
     }
   }
+
+  private record DelayClockProbe(
+      Instant transactionStartedAt,
+      Instant beforeOperation,
+      Instant afterOperation,
+      Instant availableAt,
+      long delayMillis) {}
 }
