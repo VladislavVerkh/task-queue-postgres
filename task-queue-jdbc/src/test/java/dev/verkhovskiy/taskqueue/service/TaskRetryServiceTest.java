@@ -1,6 +1,7 @@
 package dev.verkhovskiy.taskqueue.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -44,7 +45,7 @@ class TaskRetryServiceTest {
     UUID taskId = UUID.randomUUID();
     RetryBackoffDecision decision = RetryBackoffDecision.retryAfter(2, 5_000);
     when(retryBackoffPolicy.nextRetry(1)).thenReturn(decision);
-    when(retryExceptionClassifier.isRetryable(org.mockito.ArgumentMatchers.any())).thenReturn(true);
+    when(retryExceptionClassifier.isRetryable(any())).thenReturn(true);
 
     RetryBackoffDecision actual =
         service.retryOrFinalize(taskId, 1, new RuntimeException("boom"), "worker-1");
@@ -57,8 +58,7 @@ class TaskRetryServiceTest {
   @Test
   void retryOrFinalizeWithWorkerIdRemovesOnlyOwnedTaskWhenErrorIsNonRetryable() {
     UUID taskId = UUID.randomUUID();
-    when(retryExceptionClassifier.isRetryable(org.mockito.ArgumentMatchers.any()))
-        .thenReturn(false);
+    when(retryExceptionClassifier.isRetryable(any())).thenReturn(false);
 
     RetryBackoffDecision actual =
         service.retryOrFinalize(taskId, 3, new IllegalArgumentException("bad"), "worker-1");
@@ -74,8 +74,7 @@ class TaskRetryServiceTest {
     properties.setDeadLetterEnabled(true);
     UUID taskId = UUID.randomUUID();
     IllegalArgumentException failure = new IllegalArgumentException("bad payload");
-    when(retryExceptionClassifier.isRetryable(org.mockito.ArgumentMatchers.any()))
-        .thenReturn(false);
+    when(retryExceptionClassifier.isRetryable(any())).thenReturn(false);
 
     RetryBackoffDecision actual = service.retryOrFinalize(taskId, 0, failure, "worker-1");
 

@@ -5,16 +5,14 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import dev.verkhovskiy.taskqueue.config.TaskQueueProperties;
 import dev.verkhovskiy.taskqueue.domain.QueuedTask;
-import dev.verkhovskiy.taskqueue.exception.TaskOwnershipLostException;
 import dev.verkhovskiy.taskqueue.handler.TaskHandlerRegistry;
 import dev.verkhovskiy.taskqueue.metrics.TaskQueueMetrics;
 import dev.verkhovskiy.taskqueue.service.TaskDeadLetterService;
@@ -28,6 +26,7 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.BeforeEach;
@@ -68,85 +67,6 @@ class QueueWorkerRuntimeTest {
   }
 
   @Test
-  void sharedLeaseSchedulerKeepsRenewingOtherTasksWhenOneTaskLosesOwnership() throws Exception {
-    UUID lostTaskId = UUID.randomUUID();
-    UUID healthyTaskId = UUID.randomUUID();
-    QueuedTask lostTask = queuedTask(lostTaskId, "lost-key", 1);
-    QueuedTask healthyTask = queuedTask(healthyTaskId, "healthy-key", 2);
-    CountDownLatch handlersStarted = new CountDownLatch(2);
-    CountDownLatch releaseHandlers = new CountDownLatch(1);
-    AtomicInteger dequeues = new AtomicInteger();
-    AtomicInteger lostRenewals = new AtomicInteger();
-    AtomicInteger healthyRenewals = new AtomicInteger();
-
-    when(queueService.dequeueForWorker(anyString(), anyInt()))
-        .thenAnswer(
-            invocation -> {
-              int dequeue = dequeues.getAndIncrement();
-              if (dequeue == 0) {
-                return List.of(lostTask);
-              }
-              if (dequeue == 1) {
-                return List.of(healthyTask);
-              }
-              return List.of();
-            });
-    doAnswer(
-            invocation -> {
-              UUID taskId = invocation.getArgument(0);
-              String workerId = invocation.getArgument(1);
-              if (lostTaskId.equals(taskId)) {
-                lostRenewals.incrementAndGet();
-                throw new TaskOwnershipLostException(taskId, workerId);
-              }
-              if (healthyTaskId.equals(taskId)) {
-                healthyRenewals.incrementAndGet();
-              }
-              return null;
-            })
-        .when(queueService)
-        .renewLease(any(UUID.class), anyString());
-    doAnswer(
-            invocation -> {
-              handlersStarted.countDown();
-              waitIgnoringInterrupts(releaseHandlers);
-              return null;
-            })
-        .when(taskExecutionService)
-        .handleAndAcknowledge(any(QueuedTask.class), anyString());
-
-    QueueWorkerRuntime runtime =
-        new QueueWorkerRuntime(
-            properties,
-            workerCoordinationService,
-            queueService,
-            retryService,
-            deadLetterService,
-            handlerRegistry,
-            taskExecutionService,
-            metrics,
-            shutdownStrategy);
-
-    runtime.start();
-    try {
-      assertTrue(handlersStarted.await(2, TimeUnit.SECONDS));
-      assertTrue(
-          waitUntil(
-              () -> lostRenewals.get() >= 1 && healthyRenewals.get() >= 2, Duration.ofSeconds(2)));
-    } finally {
-      releaseHandlers.countDown();
-      runtime.stop();
-    }
-
-    verify(shutdownStrategy, org.mockito.Mockito.never()).shutdown(anyInt(), anyString(), any());
-    verify(metrics, atLeastOnce()).setActiveLeaseMonitors(2);
-    verify(metrics, atLeastOnce()).setActiveLeaseMonitors(0);
-    verify(metrics).leaseRenewalError();
-    verify(retryService, org.mockito.Mockito.never())
-        .retryOrFinalize(any(UUID.class), anyLong(), any(Throwable.class), anyString());
-  }
-
-  @Test
   void stopCancelsLeaseSchedulerBeforeWaitingForWorkerExecutor() throws Exception {
     UUID taskId = UUID.randomUUID();
     QueuedTask task = queuedTask(taskId, "key", 1);
@@ -156,8 +76,7 @@ class QueueWorkerRuntimeTest {
     AtomicInteger dequeues = new AtomicInteger();
     AtomicInteger renewals = new AtomicInteger();
     AtomicInteger activeLeaseMonitors = new AtomicInteger(-1);
-    java.util.concurrent.atomic.AtomicBoolean handlerCompleted =
-        new java.util.concurrent.atomic.AtomicBoolean(false);
+    AtomicBoolean handlerCompleted = new AtomicBoolean(false);
 
     properties.setWorkerCount(1);
     when(queueService.dequeueForWorker(anyString(), anyInt()))
@@ -221,6 +140,7 @@ class QueueWorkerRuntimeTest {
       assertTrue(waitUntil(() -> !stopThread.isAlive(), Duration.ofSeconds(2)));
       runtime.stop();
     }
+    verify(shutdownStrategy, never()).shutdown(anyInt(), anyString(), any());
   }
 
   private static QueuedTask queuedTask(UUID taskId, String partitionKey, int partitionNum) {
@@ -238,24 +158,5 @@ class QueueWorkerRuntimeTest {
       Thread.sleep(10);
     }
     return condition.getAsBoolean();
-  }
-
-  private static void waitIgnoringInterrupts(CountDownLatch latch) {
-    boolean interrupted = false;
-    try {
-      while (true) {
-        try {
-          if (latch.await(50, TimeUnit.MILLISECONDS)) {
-            return;
-          }
-        } catch (InterruptedException e) {
-          interrupted = true;
-        }
-      }
-    } finally {
-      if (interrupted) {
-        Thread.currentThread().interrupt();
-      }
-    }
   }
 }

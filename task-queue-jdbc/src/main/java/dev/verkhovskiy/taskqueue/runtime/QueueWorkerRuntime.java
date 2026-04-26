@@ -27,7 +27,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -118,7 +117,14 @@ public class QueueWorkerRuntime implements SmartLifecycle {
               thread.setName("task-runtime-lease-" + THREAD_COUNTER.incrementAndGet());
               return thread;
             });
-    leaseRenewalScheduler = new TaskLeaseRenewalScheduler();
+    leaseRenewalScheduler =
+        new TaskLeaseRenewalScheduler(
+            leaseExecutor,
+            taskLeaseRenewInterval(),
+            running::get,
+            queueService,
+            metrics,
+            this::handleLeaseRenewalFailure);
     leaseRenewalScheduler.start();
 
     IntStream.range(0, properties.getWorkerCount())
@@ -279,9 +285,8 @@ public class QueueWorkerRuntime implements SmartLifecycle {
    * @param task задача из очереди
    */
   private void processTask(String workerId, QueuedTask task) {
-    TaskLeaseMonitor taskLeaseMonitor =
-        new TaskLeaseMonitor(workerId, task.taskId(), Thread.currentThread());
-    taskLeaseMonitor.start();
+    TaskLeaseRenewalScheduler.TaskLeaseMonitor taskLeaseMonitor =
+        leaseRenewalScheduler.register(workerId, task.taskId(), Thread.currentThread());
     try {
       if (properties.getHandlingTransactionMode() == TaskHandlingTransactionMode.TRANSACTIONAL) {
         taskExecutionService.handleAndAcknowledge(task, workerId);
@@ -529,125 +534,18 @@ public class QueueWorkerRuntime implements SmartLifecycle {
     return Duration.ofMillis(Math.max(1L, leaseMillis / 3));
   }
 
-  /** Общий scheduler продления lease для всех in-flight задач. */
-  private final class TaskLeaseRenewalScheduler {
-    private final List<TaskLeaseMonitor> monitors = new CopyOnWriteArrayList<>();
-    private ScheduledFuture<?> future;
-
-    private void start() {
-      long renewIntervalMillis = Math.max(1L, taskLeaseRenewInterval().toMillis());
-      future =
-          leaseExecutor.scheduleWithFixedDelay(
-              this::renewActiveLeases,
-              renewIntervalMillis,
-              renewIntervalMillis,
-              TimeUnit.MILLISECONDS);
+  private void handleLeaseRenewalFailure(UUID taskId, Throwable failure) {
+    if (failure instanceof RuntimeException runtimeException) {
+      destroyApplication(
+          TASK_STATE_UPDATE_FAILED_EXIT_CODE,
+          "Stopping application because task lease renewal failed, taskId=" + taskId,
+          runtimeException);
+      return;
     }
 
-    private void register(TaskLeaseMonitor monitor) {
-      monitors.add(monitor);
-      updateActiveLeaseMonitorMetric();
-    }
-
-    private void unregister(TaskLeaseMonitor monitor) {
-      monitor.cancel();
-      monitors.remove(monitor);
-      updateActiveLeaseMonitorMetric();
-    }
-
-    private void stop() {
-      ScheduledFuture<?> scheduledFuture = future;
-      if (scheduledFuture != null) {
-        scheduledFuture.cancel(true);
-      }
-      monitors.forEach(TaskLeaseMonitor::cancel);
-      monitors.clear();
-      updateActiveLeaseMonitorMetric();
-    }
-
-    private void renewActiveLeases() {
-      if (!running.get() || Thread.currentThread().isInterrupted()) {
-        return;
-      }
-
-      removeCancelledMonitors();
-      for (TaskLeaseMonitor monitor : monitors) {
-        monitor.renewLease();
-      }
-      removeCancelledMonitors();
-    }
-
-    private void removeCancelledMonitors() {
-      monitors.removeIf(TaskLeaseMonitor::cancelled);
-      updateActiveLeaseMonitorMetric();
-    }
-
-    private void updateActiveLeaseMonitorMetric() {
-      metrics.setActiveLeaseMonitors(monitors.size());
-    }
-  }
-
-  /** Монитор продления lease конкретной in-flight задачи. */
-  private final class TaskLeaseMonitor {
-    private final String workerId;
-    private final UUID taskId;
-    private final Thread processingThread;
-    private final AtomicBoolean cancelled = new AtomicBoolean(false);
-
-    private TaskLeaseMonitor(String workerId, UUID taskId, Thread processingThread) {
-      this.workerId = workerId;
-      this.taskId = taskId;
-      this.processingThread = processingThread;
-    }
-
-    private void start() {
-      leaseRenewalScheduler.register(this);
-    }
-
-    private void stop() {
-      leaseRenewalScheduler.unregister(this);
-    }
-
-    private void cancel() {
-      cancelled.set(true);
-    }
-
-    private boolean cancelled() {
-      return cancelled.get();
-    }
-
-    private void renewLease() {
-      if (!running.get() || cancelled.get() || Thread.currentThread().isInterrupted()) {
-        return;
-      }
-
-      try {
-        queueService.renewLease(taskId, workerId);
-      } catch (TaskOwnershipLostException e) {
-        metrics.leaseRenewalError();
-        log.warn(
-            "Task {} lease ownership lost by worker {}, interrupting processing thread",
-            taskId,
-            workerId);
-        processingThread.interrupt();
-        cancelled.set(true);
-      } catch (RuntimeException e) {
-        metrics.leaseRenewalError();
-        cancelled.set(true);
-        destroyApplication(
-            TASK_STATE_UPDATE_FAILED_EXIT_CODE,
-            "Stopping application because task lease renewal failed, taskId=" + taskId,
-            e);
-        throw e;
-      } catch (Throwable e) {
-        metrics.leaseRenewalError();
-        cancelled.set(true);
-        if (running.get()) {
-          destroyApplication(
-              RUNTIME_TASK_FAILED_EXIT_CODE, "Task lease monitor failed for task " + taskId, e);
-        }
-        rethrowUnchecked(e);
-      }
+    if (running.get()) {
+      destroyApplication(
+          RUNTIME_TASK_FAILED_EXIT_CODE, "Task lease monitor failed for task " + taskId, failure);
     }
   }
 
