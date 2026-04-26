@@ -20,6 +20,7 @@
 | `task.queue.stop-application-on-heartbeat-timeout` | `boolean`      | Запрашивать остановку приложения при heartbeat timeout            | `false`               | `true/false`                                  |
 | `task.queue.cleanup-interval`                      | `Duration`     | Интервал запуска cleanup dead workers                             | `1s`                  | `>= 1ms`                                      |
 | `task.queue.queue-metrics-interval`                | `Duration`     | Интервал обновления aggregate gauge-метрик очереди                | `10s`                 | `>= 1ms`                                      |
+| `task.queue.partition-lag-metrics-enabled`         | `boolean`      | Включает per-partition lag gauge-метрики                          | `false`               | `true/false`                                  |
 | `task.queue.shutdown-timeout`                      | `Duration`     | Сколько ждать завершения in-flight задач при shutdown             | `20s`                 | `>= 1ms`                                      |
 | `task.queue.cleanup-batch-size`                    | `int`          | Максимум удаляемых dead workers за один cleanup                   | `32`                  | `> 0`                                         |
 | `task.queue.retry-max-attempts`                    | `int`          | Максимум retry-попыток                                            | `3`                   | `>= 0`                                        |
@@ -51,6 +52,7 @@ task.queue.runtime-enabled=true
 task.queue.poll-max-tasks-per-partition=5
 task.queue.task-lease-timeout=5m
 task.queue.queue-metrics-interval=10s
+task.queue.partition-lag-metrics-enabled=false
 task.queue.shutdown-timeout=20s
 task.queue.jdbc-statement-timeout=30s
 # Retry
@@ -74,6 +76,8 @@ task.queue.handling-transaction-mode=TRANSACTIONAL
   одного worker без `ack/retry`; runtime автоматически продлевает lease во время обработки, а после
   истечения cleanup освобождает задачу для повторной выдачи.
 - `queue-metrics-interval`: как часто cleanup-loop пересчитывает aggregate gauge-метрики очереди.
+- `partition-lag-metrics-enabled`: включает отдельные `partition.*` lag gauges; по умолчанию они
+  выключены, чтобы не делать лишние grouped-запросы на больших очередях.
 - `shutdown-timeout`: сколько runtime ждет завершения текущих задач при штатном shutdown перед
   принудительным interrupt worker-потоков.
 - `handoff-drain-timeout`: сколько максимум ждать завершения in-flight задач у старого owner в состоянии `DRAINING`.
@@ -95,8 +99,10 @@ task.queue.handling-transaction-mode=TRANSACTIONAL
 
 `TaskDeadLetterService.requeue(taskId)` возвращает запись из `task_queue_dead_letter` в основную
 очередь с `delay_count=0` и доступностью "сейчас"; перегрузка с `availableAt` позволяет отложить
-повторную обработку. `TaskDeadLetterService.deleteOlderThan(...)` удаляет DLQ-записи вручную, а
-`task.queue.dead-letter-retention > 0` включает фоновую retention-очистку.
+повторную обработку. Для новых задач предпочтительна перегрузка
+`TaskProducer.enqueueDelayed(..., Duration delay)`: задержка считается от времени PostgreSQL, без
+зависимости от clock приложения. `TaskDeadLetterService.deleteOlderThan(...)` удаляет DLQ-записи
+вручную, а `task.queue.dead-letter-retention > 0` включает фоновую retention-очистку.
 
 ## Partition-count guard
 

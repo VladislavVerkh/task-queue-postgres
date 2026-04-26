@@ -35,6 +35,11 @@
     - вычисляет `partition_num = hash(partition_key) % partition_count + 1`;
     - пишет запись в `task_queue`.
 
+Все внутренние timestamp-поля очереди (`created_at`, `available_at`, heartbeat, lease, handoff,
+retention) считаются от времени PostgreSQL. Для отложенной постановки относительно текущего момента
+используйте `TaskProducer.enqueueDelayed(..., Duration delay)`, чтобы не зависеть от clock skew между
+JVM и БД.
+
 ### Запуск runtime
 
 При старте приложения `QueueWorkerRuntime`:
@@ -417,7 +422,9 @@ high-churn таблицы (частые `insert`/`update`/`delete`).
   `tasks.oldest_in_flight_age.seconds`
 - `tasks.retry.scheduled`, `tasks.retry.exhausted`, `tasks.non_retryable`,
   `tasks.dead_lettered`, `tasks.dead_letter.deleted`, `tasks.dead_letter.requeued`
-- `partition.ready{partition="N"}`, `partition.oldest_ready_age.seconds{partition="N"}`
+- `partition.ready{partition="N"}`, `partition.oldest_ready_age.seconds{partition="N"}` — только
+  при `task.queue.partition-lag-metrics-enabled=true`; запрос возвращает только партиции с готовыми
+  задачами и сбрасывает ранее видимые партиции в `0`
 - `rebalance.runs`, `rebalance.failures`, `rebalance.latency`
 - `handoff.started`, `handoff.completed`, `handoff.cancelled`
 - `handoff.timeout`, `handoff.timeout.extended`, `handoff.timeout.aborted`, `handoff.timeout.forced`
