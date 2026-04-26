@@ -80,6 +80,7 @@ public class QueueWorkerRuntime implements SmartLifecycle {
   private ExecutorService workerExecutor;
   private ExecutorService heartbeatExecutor;
   private ScheduledExecutorService leaseExecutor;
+  private TaskLeaseRenewalScheduler leaseRenewalScheduler;
 
   /** Запускает фоновые циклы обработки и heartbeat при старте lifecycle. */
   @Override
@@ -117,6 +118,8 @@ public class QueueWorkerRuntime implements SmartLifecycle {
               thread.setName("task-runtime-lease-" + THREAD_COUNTER.incrementAndGet());
               return thread;
             });
+    leaseRenewalScheduler = new TaskLeaseRenewalScheduler();
+    leaseRenewalScheduler.start();
 
     IntStream.range(0, properties.getWorkerCount())
         .forEach(
@@ -156,6 +159,9 @@ public class QueueWorkerRuntime implements SmartLifecycle {
           log.warn("Task heartbeat executor was not stopped gracefully within timeout");
         }
       }
+      if (leaseRenewalScheduler != null) {
+        leaseRenewalScheduler.stop();
+      }
       if (leaseExecutor != null) {
         leaseExecutor.shutdownNow();
         if (!leaseExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
@@ -167,6 +173,9 @@ public class QueueWorkerRuntime implements SmartLifecycle {
       workerExecutor.shutdownNow();
       if (heartbeatExecutor != null) {
         heartbeatExecutor.shutdownNow();
+      }
+      if (leaseRenewalScheduler != null) {
+        leaseRenewalScheduler.stop();
       }
       if (leaseExecutor != null) {
         leaseExecutor.shutdownNow();
@@ -523,13 +532,58 @@ public class QueueWorkerRuntime implements SmartLifecycle {
     return Duration.ofMillis(Math.max(1L, leaseMillis / 3));
   }
 
+  /** Общий scheduler продления lease для всех in-flight задач. */
+  private final class TaskLeaseRenewalScheduler {
+    private final List<TaskLeaseMonitor> monitors = new CopyOnWriteArrayList<>();
+    private ScheduledFuture<?> future;
+
+    private void start() {
+      long renewIntervalMillis = Math.max(1L, taskLeaseRenewInterval().toMillis());
+      future =
+          leaseExecutor.scheduleWithFixedDelay(
+              this::renewActiveLeases,
+              renewIntervalMillis,
+              renewIntervalMillis,
+              TimeUnit.MILLISECONDS);
+    }
+
+    private void register(TaskLeaseMonitor monitor) {
+      monitors.add(monitor);
+    }
+
+    private void unregister(TaskLeaseMonitor monitor) {
+      monitor.cancel();
+      monitors.remove(monitor);
+    }
+
+    private void stop() {
+      ScheduledFuture<?> scheduledFuture = future;
+      if (scheduledFuture != null) {
+        scheduledFuture.cancel(true);
+      }
+      monitors.forEach(TaskLeaseMonitor::cancel);
+      monitors.clear();
+    }
+
+    private void renewActiveLeases() {
+      if (!running.get() || Thread.currentThread().isInterrupted()) {
+        return;
+      }
+
+      monitors.removeIf(TaskLeaseMonitor::cancelled);
+      for (TaskLeaseMonitor monitor : monitors) {
+        monitor.renewLease();
+      }
+      monitors.removeIf(TaskLeaseMonitor::cancelled);
+    }
+  }
+
   /** Монитор продления lease конкретной in-flight задачи. */
   private final class TaskLeaseMonitor {
     private final String workerId;
     private final UUID taskId;
     private final Thread processingThread;
     private final AtomicBoolean cancelled = new AtomicBoolean(false);
-    private ScheduledFuture<?> future;
 
     private TaskLeaseMonitor(String workerId, UUID taskId, Thread processingThread) {
       this.workerId = workerId;
@@ -538,18 +592,19 @@ public class QueueWorkerRuntime implements SmartLifecycle {
     }
 
     private void start() {
-      long renewIntervalMillis = Math.max(1L, taskLeaseRenewInterval().toMillis());
-      future =
-          leaseExecutor.scheduleWithFixedDelay(
-              this::renewLease, renewIntervalMillis, renewIntervalMillis, TimeUnit.MILLISECONDS);
+      leaseRenewalScheduler.register(this);
     }
 
     private void stop() {
+      leaseRenewalScheduler.unregister(this);
+    }
+
+    private void cancel() {
       cancelled.set(true);
-      ScheduledFuture<?> scheduledFuture = future;
-      if (scheduledFuture != null) {
-        scheduledFuture.cancel(true);
-      }
+    }
+
+    private boolean cancelled() {
+      return cancelled.get();
     }
 
     private void renewLease() {
