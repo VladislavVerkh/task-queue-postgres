@@ -1,5 +1,7 @@
 package dev.verkhovskiy.taskqueue.runtime;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -142,6 +144,83 @@ class QueueWorkerRuntimeTest {
     verify(metrics).leaseRenewalError();
     verify(retryService, org.mockito.Mockito.never())
         .retryOrFinalize(any(UUID.class), anyLong(), any(Throwable.class), anyString());
+  }
+
+  @Test
+  void stopCancelsLeaseSchedulerBeforeWaitingForWorkerExecutor() throws Exception {
+    UUID taskId = UUID.randomUUID();
+    QueuedTask task = queuedTask(taskId, "key", 1);
+    CountDownLatch handlerStarted = new CountDownLatch(1);
+    CountDownLatch releaseHandler = new CountDownLatch(1);
+    CountDownLatch activeMonitorsReset = new CountDownLatch(1);
+    AtomicInteger dequeues = new AtomicInteger();
+    AtomicInteger renewals = new AtomicInteger();
+    AtomicInteger activeLeaseMonitors = new AtomicInteger(-1);
+    java.util.concurrent.atomic.AtomicBoolean handlerCompleted =
+        new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    properties.setWorkerCount(1);
+    when(queueService.dequeueForWorker(anyString(), anyInt()))
+        .thenAnswer(invocation -> dequeues.getAndIncrement() == 0 ? List.of(task) : List.of());
+    doAnswer(
+            invocation -> {
+              renewals.incrementAndGet();
+              return null;
+            })
+        .when(queueService)
+        .renewLease(any(UUID.class), anyString());
+    doAnswer(
+            invocation -> {
+              int count = invocation.getArgument(0);
+              activeLeaseMonitors.set(count);
+              if (count == 0) {
+                activeMonitorsReset.countDown();
+              }
+              return null;
+            })
+        .when(metrics)
+        .setActiveLeaseMonitors(anyInt());
+    doAnswer(
+            invocation -> {
+              handlerStarted.countDown();
+              releaseHandler.await();
+              handlerCompleted.set(true);
+              return null;
+            })
+        .when(taskExecutionService)
+        .handleAndAcknowledge(any(QueuedTask.class), anyString());
+
+    QueueWorkerRuntime runtime =
+        new QueueWorkerRuntime(
+            properties,
+            workerCoordinationService,
+            queueService,
+            retryService,
+            deadLetterService,
+            handlerRegistry,
+            taskExecutionService,
+            metrics,
+            shutdownStrategy);
+    Thread stopThread = new Thread(runtime::stop, "queue-runtime-stop-test");
+
+    runtime.start();
+    try {
+      assertTrue(handlerStarted.await(2, TimeUnit.SECONDS));
+      assertTrue(waitUntil(() -> activeLeaseMonitors.get() == 1, Duration.ofSeconds(1)));
+      assertTrue(waitUntil(() -> renewals.get() > 0, Duration.ofSeconds(1)));
+
+      stopThread.start();
+
+      assertTrue(activeMonitorsReset.await(250, TimeUnit.MILLISECONDS));
+      assertFalse(handlerCompleted.get());
+      int renewalsAfterSchedulerStop = renewals.get();
+      Thread.sleep(150);
+      assertEquals(renewalsAfterSchedulerStop, renewals.get());
+    } finally {
+      releaseHandler.countDown();
+      assertTrue(waitUntil(() -> !stopThread.isAlive(), Duration.ofSeconds(2)));
+      runtime.stop();
+    }
   }
 
   private static QueuedTask queuedTask(UUID taskId, String partitionKey, int partitionNum) {

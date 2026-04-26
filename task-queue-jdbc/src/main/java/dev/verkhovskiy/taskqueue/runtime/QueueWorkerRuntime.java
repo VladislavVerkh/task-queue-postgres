@@ -139,6 +139,9 @@ public class QueueWorkerRuntime implements SmartLifecycle {
     if (!running.compareAndSet(true, false)) {
       return;
     }
+    if (leaseRenewalScheduler != null) {
+      leaseRenewalScheduler.stop();
+    }
     if (workerExecutor == null) {
       return;
     }
@@ -159,9 +162,6 @@ public class QueueWorkerRuntime implements SmartLifecycle {
           log.warn("Task heartbeat executor was not stopped gracefully within timeout");
         }
       }
-      if (leaseRenewalScheduler != null) {
-        leaseRenewalScheduler.stop();
-      }
       if (leaseExecutor != null) {
         leaseExecutor.shutdownNow();
         if (!leaseExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
@@ -173,9 +173,6 @@ public class QueueWorkerRuntime implements SmartLifecycle {
       workerExecutor.shutdownNow();
       if (heartbeatExecutor != null) {
         heartbeatExecutor.shutdownNow();
-      }
-      if (leaseRenewalScheduler != null) {
-        leaseRenewalScheduler.stop();
       }
       if (leaseExecutor != null) {
         leaseExecutor.shutdownNow();
