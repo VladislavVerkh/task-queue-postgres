@@ -549,11 +549,13 @@ public class QueueWorkerRuntime implements SmartLifecycle {
 
     private void register(TaskLeaseMonitor monitor) {
       monitors.add(monitor);
+      updateActiveLeaseMonitorMetric();
     }
 
     private void unregister(TaskLeaseMonitor monitor) {
       monitor.cancel();
       monitors.remove(monitor);
+      updateActiveLeaseMonitorMetric();
     }
 
     private void stop() {
@@ -563,6 +565,7 @@ public class QueueWorkerRuntime implements SmartLifecycle {
       }
       monitors.forEach(TaskLeaseMonitor::cancel);
       monitors.clear();
+      updateActiveLeaseMonitorMetric();
     }
 
     private void renewActiveLeases() {
@@ -570,11 +573,20 @@ public class QueueWorkerRuntime implements SmartLifecycle {
         return;
       }
 
-      monitors.removeIf(TaskLeaseMonitor::cancelled);
+      removeCancelledMonitors();
       for (TaskLeaseMonitor monitor : monitors) {
         monitor.renewLease();
       }
+      removeCancelledMonitors();
+    }
+
+    private void removeCancelledMonitors() {
       monitors.removeIf(TaskLeaseMonitor::cancelled);
+      updateActiveLeaseMonitorMetric();
+    }
+
+    private void updateActiveLeaseMonitorMetric() {
+      metrics.setActiveLeaseMonitors(monitors.size());
     }
   }
 
@@ -615,6 +627,7 @@ public class QueueWorkerRuntime implements SmartLifecycle {
       try {
         queueService.renewLease(taskId, workerId);
       } catch (TaskOwnershipLostException e) {
+        metrics.leaseRenewalError();
         log.warn(
             "Task {} lease ownership lost by worker {}, interrupting processing thread",
             taskId,
@@ -622,6 +635,7 @@ public class QueueWorkerRuntime implements SmartLifecycle {
         processingThread.interrupt();
         cancelled.set(true);
       } catch (RuntimeException e) {
+        metrics.leaseRenewalError();
         cancelled.set(true);
         destroyApplication(
             TASK_STATE_UPDATE_FAILED_EXIT_CODE,
@@ -629,6 +643,7 @@ public class QueueWorkerRuntime implements SmartLifecycle {
             e);
         throw e;
       } catch (Throwable e) {
+        metrics.leaseRenewalError();
         cancelled.set(true);
         if (running.get()) {
           destroyApplication(

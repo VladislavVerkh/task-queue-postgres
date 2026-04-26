@@ -418,6 +418,7 @@ high-churn таблицы (частые `insert`/`update`/`delete`).
 - `heartbeat.success`, `heartbeat.failure`, `heartbeat.timeout`, `heartbeat.not_found`,
   `heartbeat.latency`
 - `cleanup.runs`, `cleanup.removed`, `cleanup.expired_task_leases.released`
+- `lease.monitors.active`, `lease.renewal.errors`
 - `tasks.ready`, `tasks.in_flight`, `tasks.oldest_ready_age.seconds`,
   `tasks.oldest_in_flight_age.seconds`
 - `tasks.retry.scheduled`, `tasks.retry.exhausted`, `tasks.non_retryable`,

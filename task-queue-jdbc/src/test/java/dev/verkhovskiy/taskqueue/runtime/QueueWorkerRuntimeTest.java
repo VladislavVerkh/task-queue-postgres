@@ -5,6 +5,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -136,6 +137,9 @@ class QueueWorkerRuntimeTest {
     }
 
     verify(shutdownStrategy, org.mockito.Mockito.never()).shutdown(anyInt(), anyString(), any());
+    verify(metrics, atLeastOnce()).setActiveLeaseMonitors(2);
+    verify(metrics, atLeastOnce()).setActiveLeaseMonitors(0);
+    verify(metrics).leaseRenewalError();
     verify(retryService, org.mockito.Mockito.never())
         .retryOrFinalize(any(UUID.class), anyLong(), any(Throwable.class), anyString());
   }

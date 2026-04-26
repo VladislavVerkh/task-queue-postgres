@@ -11,6 +11,23 @@ import org.junit.jupiter.api.Test;
 class TaskQueueMetricsTest {
 
   @Test
+  void tracksActiveLeaseMonitorsAndRenewalErrors() {
+    MeterRegistry meterRegistry = new SimpleMeterRegistry();
+    TaskQueueMetrics metrics = new TaskQueueMetrics(meterRegistry);
+
+    metrics.setActiveLeaseMonitors(3);
+    metrics.leaseRenewalError();
+    metrics.leaseRenewalError();
+
+    assertEquals(3, meterRegistry.get("task.queue.process.lease.monitors.active").gauge().value());
+    assertEquals(2, meterRegistry.get("task.queue.process.lease.renewal.errors").counter().count());
+
+    metrics.setActiveLeaseMonitors(-1);
+
+    assertEquals(0, meterRegistry.get("task.queue.process.lease.monitors.active").gauge().value());
+  }
+
+  @Test
   void setPartitionLagResetsMissingPartitionGaugesToZero() {
     MeterRegistry meterRegistry = new SimpleMeterRegistry();
     TaskQueueMetrics metrics = new TaskQueueMetrics(meterRegistry);

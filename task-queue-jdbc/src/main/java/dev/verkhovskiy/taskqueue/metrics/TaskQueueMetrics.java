@@ -34,6 +34,7 @@ public class TaskQueueMetrics {
   private final Counter cleanupRuns;
   private final Counter cleanupRemoved;
   private final Counter cleanupExpiredTaskLeasesReleased;
+  private final Counter leaseRenewalErrors;
   private final Counter retryScheduled;
   private final Counter retryExhausted;
   private final Counter nonRetryable;
@@ -53,6 +54,7 @@ public class TaskQueueMetrics {
   private final Timer rebalanceLatency;
   private final Timer handoffDuration;
   private final AtomicInteger drainingAssignments;
+  private final AtomicInteger activeLeaseMonitors;
   private final AtomicLong readyTasks;
   private final AtomicLong inFlightTasks;
   private final AtomicLong oldestReadyTaskAgeSeconds;
@@ -78,6 +80,7 @@ public class TaskQueueMetrics {
     cleanupRemoved = meterRegistry.counter("task.queue.process.cleanup.removed");
     cleanupExpiredTaskLeasesReleased =
         meterRegistry.counter("task.queue.process.cleanup.expired_task_leases.released");
+    leaseRenewalErrors = meterRegistry.counter("task.queue.process.lease.renewal.errors");
     retryScheduled = meterRegistry.counter("task.queue.tasks.retry.scheduled");
     retryExhausted = meterRegistry.counter("task.queue.tasks.retry.exhausted");
     nonRetryable = meterRegistry.counter("task.queue.tasks.non_retryable");
@@ -97,11 +100,13 @@ public class TaskQueueMetrics {
     rebalanceLatency = meterRegistry.timer("task.queue.process.rebalance.latency");
     handoffDuration = meterRegistry.timer("task.queue.process.handoff.duration");
     drainingAssignments = new AtomicInteger(0);
+    activeLeaseMonitors = new AtomicInteger(0);
     readyTasks = new AtomicLong(0);
     inFlightTasks = new AtomicLong(0);
     oldestReadyTaskAgeSeconds = new AtomicLong(0);
     oldestInFlightTaskAgeSeconds = new AtomicLong(0);
     meterRegistry.gauge("task.queue.process.handoff.draining.partitions", drainingAssignments);
+    meterRegistry.gauge("task.queue.process.lease.monitors.active", activeLeaseMonitors);
     meterRegistry.gauge("task.queue.tasks.ready", readyTasks);
     meterRegistry.gauge("task.queue.tasks.in_flight", inFlightTasks);
     meterRegistry.gauge("task.queue.tasks.oldest_ready_age.seconds", oldestReadyTaskAgeSeconds);
@@ -165,6 +170,11 @@ public class TaskQueueMetrics {
     if (releasedCount > 0) {
       cleanupExpiredTaskLeasesReleased.increment(releasedCount);
     }
+  }
+
+  /** Увеличивает счетчик ошибок продления task lease. */
+  public void leaseRenewalError() {
+    leaseRenewalErrors.increment();
   }
 
   /** Увеличивает счетчик задач, запланированных на retry. */
@@ -262,6 +272,11 @@ public class TaskQueueMetrics {
   /** Обновляет gauge количества партиций в DRAINING. */
   public void setDrainingAssignments(int count) {
     drainingAssignments.set(Math.max(0, count));
+  }
+
+  /** Обновляет gauge количества активных lease monitors. */
+  public void setActiveLeaseMonitors(int count) {
+    activeLeaseMonitors.set(Math.max(0, count));
   }
 
   /**
