@@ -68,6 +68,9 @@ task.queue.retryable-exceptions=java.io.IOException,java.util.concurrent.Timeout
 task.queue.not-retryable-exceptions=java.lang.IllegalArgumentException
 # Режим транзакций хэндлера
 task.queue.handling-transaction-mode=TRANSACTIONAL
+# Только при подключенном модуле task-queue-rest
+task.queue.rest.enabled=true
+task.queue.rest.base-path=/task-queue/admin/v1
 ```
 
 ## Handoff/Drain: как читать настройки
@@ -86,6 +89,13 @@ task.queue.handling-transaction-mode=TRANSACTIONAL
   - `EXTEND` — безопасный дефолт: ownership не передается, дедлайн продлевается.
   - `ABORT` — откат handoff: партиция возвращается в `ACTIVE` у текущего owner.
   - `FORCE` — принудительная передача ownership новому owner даже при наличии in-flight у старого.
+
+## REST-модуль
+
+Свойства `task.queue.rest.*` действуют только при подключенной зависимости `task-queue-rest`.
+По умолчанию REST endpoints включены и доступны под `/task-queue/admin/v1`; модуль можно отключить
+через `task.queue.rest.enabled=false` или перенести namespace через `task.queue.rest.base-path`.
+Список endpoints описан в [task-queue-rest.md](task-queue-rest.md).
 
 ## Dead Letter
 

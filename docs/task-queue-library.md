@@ -7,9 +7,11 @@
 - [Архитектура](task-queue-architecture.md)
 - [Границы транзакций](task-queue-transactions.md)
 - [Конфигурационные свойства](task-queue-properties.md)
+- [Служебный REST API](task-queue-rest.md)
 
 ## Что где смотреть
 
 - Архитектурные потоки, ребаланс, lock-стратегия, схема хранения и метрики: [task-queue-architecture.md](task-queue-architecture.md)
 - Полный перечень `@Transactional`-границ: [task-queue-transactions.md](task-queue-transactions.md)
 - Все свойства `task.queue.*` с дефолтами и ограничениями: [task-queue-properties.md](task-queue-properties.md)
+- Обычные Spring MVC endpoints для обслуживания очереди: [task-queue-rest.md](task-queue-rest.md)

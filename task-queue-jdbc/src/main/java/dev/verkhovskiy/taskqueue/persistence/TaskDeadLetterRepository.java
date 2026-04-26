@@ -257,6 +257,19 @@ public class TaskDeadLetterRepository {
             .addValue("limit", limit));
   }
 
+  /** Возвращает текущее количество dead-letter записей. */
+  public long countDeadLetters() {
+    Long count =
+        jdbc.queryForObject(
+            """
+            select count(*)
+              from task_queue_dead_letter
+            """,
+            new MapSqlParameterSource(),
+            Long.class);
+    return count == null ? 0L : count;
+  }
+
   private void removeOwnedTask(UUID taskId, String workerId) {
     int updated =
         jdbc.update(

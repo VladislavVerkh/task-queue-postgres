@@ -96,6 +96,8 @@ class TaskQueueJdbcPostgresIntegrationTest {
   @Autowired private TaskProducer taskProducer;
   @Autowired private TaskQueueRepository queueRepository;
   @Autowired private TaskQueueMetricsRepository queueMetricsRepository;
+  @Autowired private TaskDeadLetterRepository deadLetterRepository;
+  @Autowired private WorkerRegistryRepository workerRegistryRepository;
   @Autowired private TaskQueueMetadataRepository metadataRepository;
   @Autowired private NamedParameterJdbcTemplate jdbc;
   @Autowired private PlatformTransactionManager transactionManager;
@@ -138,6 +140,14 @@ class TaskQueueJdbcPostgresIntegrationTest {
     assertEquals(1, partitionLagMetrics.size());
     assertEquals(1, partitionLagMetrics.getFirst().partitionNum());
     assertEquals(1, partitionLagMetrics.get(0).readyTasks());
+
+    List<WorkerRegistryRepository.WorkerSnapshot> workerSnapshots =
+        workerRegistryRepository.loadWorkerSnapshots(3, 3);
+    assertEquals(1, workerSnapshots.size());
+    assertEquals(WORKER_ID, workerSnapshots.getFirst().workerId());
+    assertFalse(workerSnapshots.getFirst().expired());
+    assertEquals(2, workerSnapshots.getFirst().assignedPartitions());
+    assertEquals(0, workerSnapshots.getFirst().drainingPartitions());
   }
 
   @Test
@@ -152,10 +162,12 @@ class TaskQueueJdbcPostgresIntegrationTest {
 
     assertEquals(0, countRows("task_queue", taskId));
     assertEquals(1, countRows("task_queue_dead_letter", taskId));
+    assertEquals(1, deadLetterRepository.countDeadLetters());
 
     assertTrue(deadLetterService.requeue(taskId));
     assertEquals(1, countRows("task_queue", taskId));
     assertEquals(0, countRows("task_queue_dead_letter", taskId));
+    assertEquals(0, deadLetterRepository.countDeadLetters());
 
     UUID oldDeadLetterTaskId = UUID.randomUUID();
     insertOldDeadLetter(oldDeadLetterTaskId);

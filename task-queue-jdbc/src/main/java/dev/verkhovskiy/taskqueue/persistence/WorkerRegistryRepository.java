@@ -154,6 +154,61 @@ public class WorkerRegistryRepository {
   }
 
   /**
+   * Загружает диагностический снимок зарегистрированных воркеров.
+   *
+   * @param heartbeatDeviationSec допустимое отклонение heartbeat в секундах
+   * @param timeoutMultiplier множитель timeout-а из конфигурации воркера
+   * @return список снимков воркеров в порядке регистрации
+   */
+  public List<WorkerSnapshot> loadWorkerSnapshots(
+      long heartbeatDeviationSec, int timeoutMultiplier) {
+    return jdbc.query(
+        """
+            with runtime_clock as (
+                select clock_timestamp() as now
+            )
+            select w.worker_id,
+                   w.heartbeat_last,
+                   w.timeout_sec,
+                   w.created_at,
+                   (
+                       w.heartbeat_last < runtime_clock.now
+                                        - make_interval(secs => w.timeout_sec * :timeoutMultiplier)
+                                        - make_interval(secs => :heartbeatDeviationSec)
+                   ) as expired,
+                   count(a.partition_num) filter (
+                       where a.worker_id = w.worker_id
+                   )::int as assigned_partitions,
+                   count(a.partition_num) filter (
+                       where a.worker_id = w.worker_id
+                         and a.handoff_state = 'DRAINING'
+                   )::int as draining_partitions
+              from task_worker_registry w
+             cross join runtime_clock
+              left join task_worker_partition_assignment a
+                     on a.worker_id = w.worker_id
+             group by w.worker_id,
+                      w.heartbeat_last,
+                      w.timeout_sec,
+                      w.created_at,
+                      runtime_clock.now
+             order by w.created_at
+            """,
+        new MapSqlParameterSource()
+            .addValue("heartbeatDeviationSec", heartbeatDeviationSec)
+            .addValue("timeoutMultiplier", timeoutMultiplier),
+        (rs, rowNum) ->
+            new WorkerSnapshot(
+                rs.getString("worker_id"),
+                toInstant(rs.getObject("heartbeat_last", OffsetDateTime.class)),
+                rs.getLong("timeout_sec"),
+                toInstant(rs.getObject("created_at", OffsetDateTime.class)),
+                rs.getBoolean("expired"),
+                rs.getInt("assigned_partitions"),
+                rs.getInt("draining_partitions")));
+  }
+
+  /**
    * Загружает текущее закрепление партиций, включая состояние handoff.
    *
    * @param maxPartitionNum верхняя граница номера партиции
@@ -446,4 +501,24 @@ public class WorkerRegistryRepository {
       return handoffState == HandoffState.DRAINING;
     }
   }
+
+  /**
+   * Диагностический снимок воркера.
+   *
+   * @param workerId идентификатор воркера
+   * @param heartbeatLast время последнего heartbeat
+   * @param timeoutSeconds базовый timeout heartbeat в секундах
+   * @param createdAt время регистрации воркера
+   * @param expired {@code true}, если PostgreSQL-время считает воркер просроченным
+   * @param assignedPartitions количество назначенных партиций
+   * @param drainingPartitions количество назначенных партиций в DRAINING
+   */
+  public record WorkerSnapshot(
+      String workerId,
+      Instant heartbeatLast,
+      long timeoutSeconds,
+      Instant createdAt,
+      boolean expired,
+      int assignedPartitions,
+      int drainingPartitions) {}
 }
