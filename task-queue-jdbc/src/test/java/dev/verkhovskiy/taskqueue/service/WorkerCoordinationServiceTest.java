@@ -163,6 +163,19 @@ class WorkerCoordinationServiceTest {
   void refreshesQueueStateMetrics() {
     QueueStateMetrics snapshot = new QueueStateMetrics(10, 2, 30, 5);
     when(queueRepository.loadQueueStateMetrics()).thenReturn(snapshot);
+
+    service.refreshQueueStateMetrics();
+
+    verify(metrics).setQueueState(snapshot);
+    verify(queueRepository, never()).loadPartitionLagMetrics(properties.getPartitionCount());
+    verify(metrics, never()).setPartitionLag(any());
+  }
+
+  @Test
+  void refreshesPartitionLagMetricsWhenEnabled() {
+    QueueStateMetrics snapshot = new QueueStateMetrics(10, 2, 30, 5);
+    properties.setPartitionLagMetricsEnabled(true);
+    when(queueRepository.loadQueueStateMetrics()).thenReturn(snapshot);
     when(queueRepository.loadPartitionLagMetrics(properties.getPartitionCount()))
         .thenReturn(List.of());
 

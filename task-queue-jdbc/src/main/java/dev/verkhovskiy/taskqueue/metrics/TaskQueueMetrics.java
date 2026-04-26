@@ -8,8 +8,10 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.Timer;
 import java.time.Duration;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -286,8 +288,10 @@ public class TaskQueueMetrics {
     if (snapshots == null) {
       return;
     }
+    Set<Integer> updatedPartitions = new HashSet<>(snapshots.size());
     snapshots.forEach(
         snapshot -> {
+          updatedPartitions.add(snapshot.partitionNum());
           partitionGauge(partitionReadyTasks, "task.queue.partition.ready", snapshot.partitionNum())
               .set(Math.max(0L, snapshot.readyTasks()));
           partitionGauge(
@@ -295,6 +299,18 @@ public class TaskQueueMetrics {
                   "task.queue.partition.oldest_ready_age.seconds",
                   snapshot.partitionNum())
               .set(Math.max(0L, snapshot.oldestReadyAgeSeconds()));
+        });
+    partitionReadyTasks.forEach(
+        (partitionNum, gauge) -> {
+          if (!updatedPartitions.contains(partitionNum)) {
+            gauge.set(0L);
+          }
+        });
+    partitionOldestReadyAgeSeconds.forEach(
+        (partitionNum, gauge) -> {
+          if (!updatedPartitions.contains(partitionNum)) {
+            gauge.set(0L);
+          }
         });
   }
 

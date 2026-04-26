@@ -67,6 +67,8 @@ public class TaskQueueProperties {
   @DurationMin(millis = 1)
   private Duration queueMetricsInterval = Duration.ofSeconds(10);
 
+  private boolean partitionLagMetricsEnabled = false;
+
   @NotNull
   @DurationMin(millis = 1)
   private Duration shutdownTimeout = Duration.ofSeconds(20);

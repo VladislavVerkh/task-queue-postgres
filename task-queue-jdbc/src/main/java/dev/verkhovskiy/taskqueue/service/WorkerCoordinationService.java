@@ -108,8 +108,10 @@ public class WorkerCoordinationService {
   @Transactional(transactionManager = TaskQueueBeanNames.TRANSACTION_MANAGER, readOnly = true)
   public void refreshQueueStateMetrics() {
     metrics.setQueueState(queueRepository.loadQueueStateMetrics());
-    metrics.setPartitionLag(
-        queueRepository.loadPartitionLagMetrics(properties.getPartitionCount()));
+    if (properties.isPartitionLagMetricsEnabled()) {
+      metrics.setPartitionLag(
+          queueRepository.loadPartitionLagMetrics(properties.getPartitionCount()));
+    }
   }
 
   /** Принудительно запускает ребаланс партиций. */
