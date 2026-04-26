@@ -1,10 +1,12 @@
 package dev.verkhovskiy.taskqueue.service;
 
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import dev.verkhovskiy.taskqueue.config.TaskQueueProperties;
@@ -51,6 +53,47 @@ class TaskDeadLetterServiceTest {
     assertFalse(service.requeue(taskId));
 
     verify(metrics, never()).deadLetterRequeued();
+  }
+
+  @Test
+  void requeueDelayedMovesDeadLetterToQueueWithDatabaseRelativeDelay() {
+    UUID taskId = UUID.randomUUID();
+    Duration delay = Duration.ofSeconds(30);
+    when(queueRepository.requeueDeadLetter(taskId, null, delay)).thenReturn(true);
+
+    assertTrue(service.requeueDelayed(taskId, delay));
+
+    verify(queueRepository).requeueDeadLetter(taskId, null, delay);
+    verify(metrics).deadLetterRequeued();
+  }
+
+  @Test
+  void requeueDelayedDoesNotIncrementMetricWhenTaskIsMissing() {
+    UUID taskId = UUID.randomUUID();
+    Duration delay = Duration.ofSeconds(30);
+    when(queueRepository.requeueDeadLetter(taskId, null, delay)).thenReturn(false);
+
+    assertFalse(service.requeueDelayed(taskId, delay));
+
+    verify(metrics, never()).deadLetterRequeued();
+  }
+
+  @Test
+  void requeueDelayedRejectsNullDelayBeforeSql() {
+    assertThatThrownBy(() -> service.requeueDelayed(UUID.randomUUID(), null))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("delay must be set");
+
+    verifyNoInteractions(queueRepository, metrics);
+  }
+
+  @Test
+  void requeueDelayedRejectsNegativeDelayBeforeSql() {
+    assertThatThrownBy(() -> service.requeueDelayed(UUID.randomUUID(), Duration.ofMillis(-1)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("delay must be greater than or equal to 0");
+
+    verifyNoInteractions(queueRepository, metrics);
   }
 
   @Test

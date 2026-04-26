@@ -99,7 +99,8 @@ task.queue.handling-transaction-mode=TRANSACTIONAL
 
 `TaskDeadLetterService.requeue(taskId)` возвращает запись из `task_queue_dead_letter` в основную
 очередь с `delay_count=0` и доступностью "сейчас"; перегрузка с `availableAt` позволяет отложить
-повторную обработку. Для новых задач предпочтительна перегрузка
+повторную обработку по абсолютному времени. `TaskDeadLetterService.requeueDelayed(taskId, delay)`
+откладывает requeue относительно текущего времени PostgreSQL. Для новых задач предпочтительна перегрузка
 `TaskProducer.enqueueDelayed(..., Duration delay)`: задержка считается от времени PostgreSQL, без
 зависимости от clock приложения. `TaskDeadLetterService.deleteOlderThan(...)` удаляет DLQ-записи
 вручную, а `task.queue.dead-letter-retention > 0` включает фоновую retention-очистку.

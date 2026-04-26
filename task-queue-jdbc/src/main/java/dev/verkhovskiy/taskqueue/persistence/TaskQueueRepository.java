@@ -354,6 +354,18 @@ public class TaskQueueRepository {
    * @return {@code true}, если задача перенесена в основную очередь
    */
   public boolean requeueDeadLetter(UUID taskId, Instant availableAt) {
+    return requeueDeadLetter(taskId, availableAt, null);
+  }
+
+  /**
+   * Возвращает dead-letter задачу в основную очередь.
+   *
+   * @param taskId идентификатор dead-letter задачи
+   * @param availableAt абсолютное время доступности, или {@code null}
+   * @param availableAfter задержка относительно времени PostgreSQL, или {@code null}
+   * @return {@code true}, если задача перенесена в основную очередь
+   */
+  public boolean requeueDeadLetter(UUID taskId, Instant availableAt, Duration availableAfter) {
     Integer moved =
         jdbc.queryForObject(
             """
@@ -389,7 +401,14 @@ public class TaskQueueRepository {
                        payload,
                        partition_key,
                        partition_num,
-                       coalesce(cast(:availableAt as timestamptz), runtime_clock.now),
+                       coalesce(
+                           cast(:availableAt as timestamptz),
+                           case
+                               when :availableAfterSet
+                               then runtime_clock.now + (:availableAfterMillis * interval '1 millisecond')
+                               else runtime_clock.now
+                           end
+                       ),
                        0,
                        null,
                        original_created_at,
@@ -410,7 +429,11 @@ public class TaskQueueRepository {
             """,
             new MapSqlParameterSource()
                 .addValue("taskId", taskId)
-                .addValue("availableAt", toOffsetDateTime(availableAt)),
+                .addValue("availableAt", toOffsetDateTime(availableAt))
+                .addValue("availableAfterSet", availableAfter != null)
+                .addValue(
+                    "availableAfterMillis",
+                    availableAfter == null ? 0L : Math.max(0L, availableAfter.toMillis())),
             Integer.class);
     return moved != null && moved > 0;
   }

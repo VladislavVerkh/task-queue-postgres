@@ -48,6 +48,28 @@ public class TaskDeadLetterService {
   }
 
   /**
+   * Возвращает dead-letter задачу в основную очередь с задержкой относительно времени PostgreSQL.
+   *
+   * @param taskId идентификатор dead-letter задачи
+   * @param delay задержка до доступности задачи
+   * @return {@code true}, если задача перенесена
+   */
+  @Transactional(transactionManager = TaskQueueBeanNames.TRANSACTION_MANAGER)
+  public boolean requeueDelayed(UUID taskId, Duration delay) {
+    if (delay == null) {
+      throw new IllegalArgumentException("delay must be set");
+    }
+    if (delay.isNegative()) {
+      throw new IllegalArgumentException("delay must be greater than or equal to 0");
+    }
+    boolean requeued = queueRepository.requeueDeadLetter(taskId, null, delay);
+    if (requeued) {
+      metrics.deadLetterRequeued();
+    }
+    return requeued;
+  }
+
+  /**
    * Удаляет dead-letter записи старше настроенного retention.
    *
    * @return количество удаленных записей

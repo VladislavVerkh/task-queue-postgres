@@ -234,6 +234,35 @@ class TaskQueueJdbcPostgresIntegrationTest {
   }
 
   @Test
+  void requeueDelayedDurationUsesCurrentDatabaseClockOnPostgres() {
+    UUID taskId = UUID.randomUUID();
+    insertOldDeadLetter(taskId);
+    Duration delay = Duration.ofSeconds(5);
+
+    DelayClockProbe probe =
+        new TransactionTemplate(transactionManager)
+            .execute(
+                status -> {
+                  Instant transactionStartedAt = transactionTimestamp();
+                  sleep(Duration.ofMillis(400));
+                  Instant beforeOperation = databaseClock();
+
+                  assertTrue(deadLetterService.requeueDelayed(taskId, delay));
+
+                  return new DelayClockProbe(
+                      transactionStartedAt,
+                      beforeOperation,
+                      databaseClock(),
+                      availableAt(taskId),
+                      delay.toMillis());
+                });
+
+    assertUsesOperationDatabaseClock(probe);
+    assertEquals(1, countRows("task_queue", taskId));
+    assertEquals(0, countRows("task_queue_dead_letter", taskId));
+  }
+
+  @Test
   void partitionCountGuardPersistsMetadataInPostgres() {
     assertEquals("2", metadataRepository.findValue("partition-count").orElseThrow());
   }
