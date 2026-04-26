@@ -11,7 +11,7 @@ import static org.mockito.Mockito.when;
 
 import dev.verkhovskiy.taskqueue.config.TaskQueueProperties;
 import dev.verkhovskiy.taskqueue.metrics.TaskQueueMetrics;
-import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository;
+import dev.verkhovskiy.taskqueue.persistence.TaskDeadLetterRepository;
 import java.time.Duration;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
@@ -23,7 +23,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 @ExtendWith(MockitoExtension.class)
 class TaskDeadLetterServiceTest {
 
-  @Mock private TaskQueueRepository queueRepository;
+  @Mock private TaskDeadLetterRepository deadLetterRepository;
   @Mock private TaskQueueMetrics metrics;
 
   private TaskQueueProperties properties;
@@ -32,13 +32,13 @@ class TaskDeadLetterServiceTest {
   @BeforeEach
   void setUp() {
     properties = new TaskQueueProperties();
-    service = new TaskDeadLetterService(queueRepository, properties, metrics);
+    service = new TaskDeadLetterService(deadLetterRepository, properties, metrics);
   }
 
   @Test
   void requeueMovesDeadLetterToQueue() {
     UUID taskId = UUID.randomUUID();
-    when(queueRepository.requeueDeadLetter(taskId, null)).thenReturn(true);
+    when(deadLetterRepository.requeueDeadLetter(taskId, null)).thenReturn(true);
 
     assertTrue(service.requeue(taskId));
 
@@ -48,7 +48,7 @@ class TaskDeadLetterServiceTest {
   @Test
   void requeueDoesNotIncrementMetricWhenTaskIsMissing() {
     UUID taskId = UUID.randomUUID();
-    when(queueRepository.requeueDeadLetter(taskId, null)).thenReturn(false);
+    when(deadLetterRepository.requeueDeadLetter(taskId, null)).thenReturn(false);
 
     assertFalse(service.requeue(taskId));
 
@@ -59,11 +59,11 @@ class TaskDeadLetterServiceTest {
   void requeueDelayedMovesDeadLetterToQueueWithDatabaseRelativeDelay() {
     UUID taskId = UUID.randomUUID();
     Duration delay = Duration.ofSeconds(30);
-    when(queueRepository.requeueDeadLetter(taskId, null, delay)).thenReturn(true);
+    when(deadLetterRepository.requeueDeadLetter(taskId, null, delay)).thenReturn(true);
 
     assertTrue(service.requeueDelayed(taskId, delay));
 
-    verify(queueRepository).requeueDeadLetter(taskId, null, delay);
+    verify(deadLetterRepository).requeueDeadLetter(taskId, null, delay);
     verify(metrics).deadLetterRequeued();
   }
 
@@ -71,7 +71,7 @@ class TaskDeadLetterServiceTest {
   void requeueDelayedDoesNotIncrementMetricWhenTaskIsMissing() {
     UUID taskId = UUID.randomUUID();
     Duration delay = Duration.ofSeconds(30);
-    when(queueRepository.requeueDeadLetter(taskId, null, delay)).thenReturn(false);
+    when(deadLetterRepository.requeueDeadLetter(taskId, null, delay)).thenReturn(false);
 
     assertFalse(service.requeueDelayed(taskId, delay));
 
@@ -84,7 +84,7 @@ class TaskDeadLetterServiceTest {
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessage("delay must be set");
 
-    verifyNoInteractions(queueRepository, metrics);
+    verifyNoInteractions(deadLetterRepository, metrics);
   }
 
   @Test
@@ -93,14 +93,14 @@ class TaskDeadLetterServiceTest {
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessage("delay must be greater than or equal to 0");
 
-    verifyNoInteractions(queueRepository, metrics);
+    verifyNoInteractions(deadLetterRepository, metrics);
   }
 
   @Test
   void deleteExpiredUsesRetentionAndBatchSize() {
     properties.setDeadLetterRetention(Duration.ofDays(7));
     properties.setCleanupBatchSize(100);
-    when(queueRepository.deleteDeadLettersOlderThan(Duration.ofDays(7), 100)).thenReturn(5);
+    when(deadLetterRepository.deleteDeadLettersOlderThan(Duration.ofDays(7), 100)).thenReturn(5);
 
     assertEquals(5, service.deleteExpired());
 
@@ -111,6 +111,6 @@ class TaskDeadLetterServiceTest {
   void deleteExpiredIsDisabledWhenRetentionIsZero() {
     assertEquals(0, service.deleteExpired());
 
-    verify(queueRepository, never()).deleteDeadLettersOlderThan(Duration.ZERO, 32);
+    verify(deadLetterRepository, never()).deleteDeadLettersOlderThan(Duration.ZERO, 32);
   }
 }

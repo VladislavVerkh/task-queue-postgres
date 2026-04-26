@@ -10,10 +10,12 @@ import dev.verkhovskiy.taskqueue.config.TaskQueueProperties;
 import dev.verkhovskiy.taskqueue.domain.QueuedTask;
 import dev.verkhovskiy.taskqueue.handler.TaskHandlerRegistry;
 import dev.verkhovskiy.taskqueue.metrics.TaskQueueMetrics;
+import dev.verkhovskiy.taskqueue.persistence.TaskDeadLetterRepository;
 import dev.verkhovskiy.taskqueue.persistence.TaskQueueMetadataRepository;
+import dev.verkhovskiy.taskqueue.persistence.TaskQueueMetricsRepository;
+import dev.verkhovskiy.taskqueue.persistence.TaskQueueMetricsRepository.PartitionLagMetrics;
+import dev.verkhovskiy.taskqueue.persistence.TaskQueueMetricsRepository.QueueStateMetrics;
 import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository;
-import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository.PartitionLagMetrics;
-import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository.QueueStateMetrics;
 import dev.verkhovskiy.taskqueue.persistence.WorkerRegistryRepository;
 import dev.verkhovskiy.taskqueue.retry.RetryBackoffPolicy;
 import dev.verkhovskiy.taskqueue.retry.RetryExceptionClassifier;
@@ -93,6 +95,7 @@ class TaskQueueJdbcPostgresIntegrationTest {
   @Autowired private TaskDeadLetterService deadLetterService;
   @Autowired private TaskProducer taskProducer;
   @Autowired private TaskQueueRepository queueRepository;
+  @Autowired private TaskQueueMetricsRepository queueMetricsRepository;
   @Autowired private TaskQueueMetadataRepository metadataRepository;
   @Autowired private NamedParameterJdbcTemplate jdbc;
   @Autowired private PlatformTransactionManager transactionManager;
@@ -124,13 +127,14 @@ class TaskQueueJdbcPostgresIntegrationTest {
     assertEquals(2L, tasksByPartition.get(1));
     assertEquals(2L, tasksByPartition.get(2));
 
-    QueueStateMetrics queueStateMetrics = queueRepository.loadQueueStateMetrics();
+    QueueStateMetrics queueStateMetrics = queueMetricsRepository.loadQueueStateMetrics();
     assertEquals(1, queueStateMetrics.readyTasks());
     assertEquals(4, queueStateMetrics.inFlightTasks());
     assertTrue(queueStateMetrics.oldestReadyAgeSeconds() >= 0);
     assertTrue(queueStateMetrics.oldestInFlightAgeSeconds() >= 0);
 
-    List<PartitionLagMetrics> partitionLagMetrics = queueRepository.loadPartitionLagMetrics(2);
+    List<PartitionLagMetrics> partitionLagMetrics =
+        queueMetricsRepository.loadPartitionLagMetrics(2);
     assertEquals(1, partitionLagMetrics.size());
     assertEquals(1, partitionLagMetrics.getFirst().partitionNum());
     assertEquals(1, partitionLagMetrics.get(0).readyTasks());
@@ -397,8 +401,10 @@ class TaskQueueJdbcPostgresIntegrationTest {
     RetryExceptionClassifier.class,
     TaskHandlerRegistry.class,
     TaskQueueMetrics.class,
+    TaskQueueMetricsRepository.class,
     TaskQueueMetadataRepository.class,
     TaskQueueRepository.class,
+    TaskDeadLetterRepository.class,
     WorkerRegistryRepository.class,
     TaskQueuePartitionGuard.class,
     TaskQueueService.class,

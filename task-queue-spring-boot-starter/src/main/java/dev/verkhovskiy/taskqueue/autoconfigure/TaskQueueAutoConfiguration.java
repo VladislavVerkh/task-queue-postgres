@@ -4,7 +4,9 @@ import dev.verkhovskiy.taskqueue.config.MetricsConfiguration;
 import dev.verkhovskiy.taskqueue.config.TaskQueueProperties;
 import dev.verkhovskiy.taskqueue.handler.TaskHandlerRegistry;
 import dev.verkhovskiy.taskqueue.metrics.TaskQueueMetrics;
+import dev.verkhovskiy.taskqueue.persistence.TaskDeadLetterRepository;
 import dev.verkhovskiy.taskqueue.persistence.TaskQueueMetadataRepository;
+import dev.verkhovskiy.taskqueue.persistence.TaskQueueMetricsRepository;
 import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository;
 import dev.verkhovskiy.taskqueue.persistence.WorkerRegistryRepository;
 import dev.verkhovskiy.taskqueue.retry.RetryBackoffPolicy;
@@ -35,8 +37,10 @@ import org.springframework.context.annotation.Import;
   RetryExceptionClassifier.class,
   TaskHandlerRegistry.class,
   TaskQueueMetrics.class,
+  TaskQueueMetricsRepository.class,
   TaskQueueMetadataRepository.class,
   TaskQueueRepository.class,
+  TaskDeadLetterRepository.class,
   WorkerRegistryRepository.class,
   TaskQueuePartitionGuard.class,
   TaskQueueService.class,

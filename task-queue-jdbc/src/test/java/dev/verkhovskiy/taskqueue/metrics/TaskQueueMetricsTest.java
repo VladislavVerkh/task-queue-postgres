@@ -2,7 +2,7 @@ package dev.verkhovskiy.taskqueue.metrics;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository.PartitionLagMetrics;
+import dev.verkhovskiy.taskqueue.persistence.TaskQueueMetricsRepository.PartitionLagMetrics;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.List;

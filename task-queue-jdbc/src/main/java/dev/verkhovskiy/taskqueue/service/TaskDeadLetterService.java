@@ -3,7 +3,7 @@ package dev.verkhovskiy.taskqueue.service;
 import dev.verkhovskiy.taskqueue.config.TaskQueueBeanNames;
 import dev.verkhovskiy.taskqueue.config.TaskQueueProperties;
 import dev.verkhovskiy.taskqueue.metrics.TaskQueueMetrics;
-import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository;
+import dev.verkhovskiy.taskqueue.persistence.TaskDeadLetterRepository;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
@@ -16,7 +16,7 @@ import org.springframework.transaction.annotation.Transactional;
 @RequiredArgsConstructor
 public class TaskDeadLetterService {
 
-  private final TaskQueueRepository queueRepository;
+  private final TaskDeadLetterRepository deadLetterRepository;
   private final TaskQueueProperties properties;
   private final TaskQueueMetrics metrics;
 
@@ -40,7 +40,7 @@ public class TaskDeadLetterService {
    */
   @Transactional(transactionManager = TaskQueueBeanNames.TRANSACTION_MANAGER)
   public boolean requeue(UUID taskId, Instant availableAt) {
-    boolean requeued = queueRepository.requeueDeadLetter(taskId, availableAt);
+    boolean requeued = deadLetterRepository.requeueDeadLetter(taskId, availableAt);
     if (requeued) {
       metrics.deadLetterRequeued();
     }
@@ -62,7 +62,7 @@ public class TaskDeadLetterService {
     if (delay.isNegative()) {
       throw new IllegalArgumentException("delay must be greater than or equal to 0");
     }
-    boolean requeued = queueRepository.requeueDeadLetter(taskId, null, delay);
+    boolean requeued = deadLetterRepository.requeueDeadLetter(taskId, null, delay);
     if (requeued) {
       metrics.deadLetterRequeued();
     }
@@ -81,7 +81,8 @@ public class TaskDeadLetterService {
       return 0;
     }
     int deleted =
-        queueRepository.deleteDeadLettersOlderThan(retention, properties.getCleanupBatchSize());
+        deadLetterRepository.deleteDeadLettersOlderThan(
+            retention, properties.getCleanupBatchSize());
     metrics.deadLetterDeleted(deleted);
     return deleted;
   }
@@ -95,7 +96,7 @@ public class TaskDeadLetterService {
    */
   @Transactional(transactionManager = TaskQueueBeanNames.TRANSACTION_MANAGER)
   public int deleteOlderThan(Instant cutoff, int limit) {
-    int deleted = queueRepository.deleteDeadLettersOlderThan(cutoff, limit);
+    int deleted = deadLetterRepository.deleteDeadLettersOlderThan(cutoff, limit);
     metrics.deadLetterDeleted(deleted);
     return deleted;
   }

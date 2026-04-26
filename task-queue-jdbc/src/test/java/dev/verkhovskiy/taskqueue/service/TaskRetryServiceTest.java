@@ -9,6 +9,7 @@ import static org.mockito.Mockito.when;
 
 import dev.verkhovskiy.taskqueue.config.TaskQueueProperties;
 import dev.verkhovskiy.taskqueue.metrics.TaskQueueMetrics;
+import dev.verkhovskiy.taskqueue.persistence.TaskDeadLetterRepository;
 import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository;
 import dev.verkhovskiy.taskqueue.retry.RetryBackoffDecision;
 import dev.verkhovskiy.taskqueue.retry.RetryBackoffPolicy;
@@ -25,6 +26,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 class TaskRetryServiceTest {
 
   @Mock private TaskQueueRepository queueRepository;
+  @Mock private TaskDeadLetterRepository deadLetterRepository;
   @Mock private RetryBackoffPolicy retryBackoffPolicy;
   @Mock private RetryExceptionClassifier retryExceptionClassifier;
   @Mock private TaskQueueMetrics metrics;
@@ -37,7 +39,12 @@ class TaskRetryServiceTest {
     properties = new TaskQueueProperties();
     service =
         new TaskRetryService(
-            queueRepository, retryBackoffPolicy, retryExceptionClassifier, properties, metrics);
+            queueRepository,
+            deadLetterRepository,
+            retryBackoffPolicy,
+            retryExceptionClassifier,
+            properties,
+            metrics);
   }
 
   @Test
@@ -79,7 +86,7 @@ class TaskRetryServiceTest {
     RetryBackoffDecision actual = service.retryOrFinalize(taskId, 0, failure, "worker-1");
 
     assertEquals(RetryBackoffDecision.nonRetryable(1), actual);
-    verify(queueRepository)
+    verify(deadLetterRepository)
         .deadLetterOwnedBy(
             taskId,
             "worker-1",
@@ -101,7 +108,8 @@ class TaskRetryServiceTest {
     RetryBackoffDecision actual = service.retryOrFinalize(taskId, 3, "worker-1");
 
     assertEquals(decision, actual);
-    verify(queueRepository).deadLetterOwnedBy(taskId, "worker-1", "RETRY_EXHAUSTED", null, null);
+    verify(deadLetterRepository)
+        .deadLetterOwnedBy(taskId, "worker-1", "RETRY_EXHAUSTED", null, null);
     verify(queueRepository, never()).removeOwnedBy(taskId, "worker-1");
     verify(metrics).retryExhausted();
     verify(metrics).deadLettered();

@@ -10,8 +10,9 @@ import static org.mockito.Mockito.when;
 import dev.verkhovskiy.taskqueue.config.HandoffTimeoutAction;
 import dev.verkhovskiy.taskqueue.config.TaskQueueProperties;
 import dev.verkhovskiy.taskqueue.metrics.TaskQueueMetrics;
+import dev.verkhovskiy.taskqueue.persistence.TaskQueueMetricsRepository;
+import dev.verkhovskiy.taskqueue.persistence.TaskQueueMetricsRepository.QueueStateMetrics;
 import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository;
-import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository.QueueStateMetrics;
 import dev.verkhovskiy.taskqueue.persistence.WorkerRegistryRepository;
 import java.time.Duration;
 import java.time.Instant;
@@ -30,6 +31,7 @@ class WorkerCoordinationServiceTest {
 
   @Mock private WorkerRegistryRepository workerRegistryRepository;
   @Mock private TaskQueueRepository queueRepository;
+  @Mock private TaskQueueMetricsRepository queueMetricsRepository;
   @Mock private PartitionAssignmentPlanner assignmentPlanner;
   @Mock private TaskQueueMetrics metrics;
 
@@ -55,7 +57,12 @@ class WorkerCoordinationServiceTest {
 
     service =
         new WorkerCoordinationService(
-            workerRegistryRepository, queueRepository, assignmentPlanner, properties, metrics);
+            workerRegistryRepository,
+            queueRepository,
+            queueMetricsRepository,
+            assignmentPlanner,
+            properties,
+            metrics);
   }
 
   @Test
@@ -162,12 +169,12 @@ class WorkerCoordinationServiceTest {
   @Test
   void refreshesQueueStateMetrics() {
     QueueStateMetrics snapshot = new QueueStateMetrics(10, 2, 30, 5);
-    when(queueRepository.loadQueueStateMetrics()).thenReturn(snapshot);
+    when(queueMetricsRepository.loadQueueStateMetrics()).thenReturn(snapshot);
 
     service.refreshQueueStateMetrics();
 
     verify(metrics).setQueueState(snapshot);
-    verify(queueRepository, never()).loadPartitionLagMetrics(properties.getPartitionCount());
+    verify(queueMetricsRepository, never()).loadPartitionLagMetrics(properties.getPartitionCount());
     verify(metrics, never()).setPartitionLag(any());
   }
 
@@ -175,8 +182,8 @@ class WorkerCoordinationServiceTest {
   void refreshesPartitionLagMetricsWhenEnabled() {
     QueueStateMetrics snapshot = new QueueStateMetrics(10, 2, 30, 5);
     properties.setPartitionLagMetricsEnabled(true);
-    when(queueRepository.loadQueueStateMetrics()).thenReturn(snapshot);
-    when(queueRepository.loadPartitionLagMetrics(properties.getPartitionCount()))
+    when(queueMetricsRepository.loadQueueStateMetrics()).thenReturn(snapshot);
+    when(queueMetricsRepository.loadPartitionLagMetrics(properties.getPartitionCount()))
         .thenReturn(List.of());
 
     service.refreshQueueStateMetrics();

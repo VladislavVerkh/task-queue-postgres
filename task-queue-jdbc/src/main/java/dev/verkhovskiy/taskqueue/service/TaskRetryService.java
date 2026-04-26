@@ -3,6 +3,7 @@ package dev.verkhovskiy.taskqueue.service;
 import dev.verkhovskiy.taskqueue.config.TaskQueueBeanNames;
 import dev.verkhovskiy.taskqueue.config.TaskQueueProperties;
 import dev.verkhovskiy.taskqueue.metrics.TaskQueueMetrics;
+import dev.verkhovskiy.taskqueue.persistence.TaskDeadLetterRepository;
 import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository;
 import dev.verkhovskiy.taskqueue.retry.RetryBackoffDecision;
 import dev.verkhovskiy.taskqueue.retry.RetryBackoffPolicy;
@@ -22,6 +23,7 @@ public class TaskRetryService {
   private static final int MAX_ERROR_CLASS_LENGTH = 512;
 
   private final TaskQueueRepository queueRepository;
+  private final TaskDeadLetterRepository deadLetterRepository;
   private final RetryBackoffPolicy retryBackoffPolicy;
   private final RetryExceptionClassifier retryExceptionClassifier;
   private final TaskQueueProperties properties;
@@ -87,7 +89,7 @@ public class TaskRetryService {
       return;
     }
 
-    queueRepository.deadLetterOwnedBy(
+    deadLetterRepository.deadLetterOwnedBy(
         taskId, workerId, deadLetterReason, errorClass(failure), errorMessage(failure));
     metrics.deadLettered();
   }

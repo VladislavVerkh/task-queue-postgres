@@ -3,6 +3,7 @@ package dev.verkhovskiy.taskqueue.service;
 import dev.verkhovskiy.taskqueue.config.TaskQueueBeanNames;
 import dev.verkhovskiy.taskqueue.config.TaskQueueProperties;
 import dev.verkhovskiy.taskqueue.metrics.TaskQueueMetrics;
+import dev.verkhovskiy.taskqueue.persistence.TaskQueueMetricsRepository;
 import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository;
 import dev.verkhovskiy.taskqueue.persistence.WorkerRegistryRepository;
 import java.util.LinkedHashMap;
@@ -19,6 +20,7 @@ public class WorkerCoordinationService {
 
   private final WorkerRegistryRepository workerRegistryRepository;
   private final TaskQueueRepository queueRepository;
+  private final TaskQueueMetricsRepository queueMetricsRepository;
   private final PartitionAssignmentPlanner assignmentPlanner;
   private final TaskQueueProperties properties;
   private final TaskQueueMetrics metrics;
@@ -107,10 +109,10 @@ public class WorkerCoordinationService {
   /** Обновляет aggregate-метрики состояния очереди. */
   @Transactional(transactionManager = TaskQueueBeanNames.TRANSACTION_MANAGER, readOnly = true)
   public void refreshQueueStateMetrics() {
-    metrics.setQueueState(queueRepository.loadQueueStateMetrics());
+    metrics.setQueueState(queueMetricsRepository.loadQueueStateMetrics());
     if (properties.isPartitionLagMetricsEnabled()) {
       metrics.setPartitionLag(
-          queueRepository.loadPartitionLagMetrics(properties.getPartitionCount()));
+          queueMetricsRepository.loadPartitionLagMetrics(properties.getPartitionCount()));
     }
   }
 

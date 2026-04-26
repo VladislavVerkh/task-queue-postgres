@@ -1,7 +1,7 @@
 package dev.verkhovskiy.taskqueue.metrics;
 
-import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository.PartitionLagMetrics;
-import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository.QueueStateMetrics;
+import dev.verkhovskiy.taskqueue.persistence.TaskQueueMetricsRepository.PartitionLagMetrics;
+import dev.verkhovskiy.taskqueue.persistence.TaskQueueMetricsRepository.QueueStateMetrics;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
