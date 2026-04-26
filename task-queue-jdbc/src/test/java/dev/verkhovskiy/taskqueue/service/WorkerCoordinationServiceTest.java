@@ -2,7 +2,6 @@ package dev.verkhovskiy.taskqueue.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -14,10 +13,8 @@ import dev.verkhovskiy.taskqueue.metrics.TaskQueueMetrics;
 import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository;
 import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository.QueueStateMetrics;
 import dev.verkhovskiy.taskqueue.persistence.WorkerRegistryRepository;
-import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
@@ -30,7 +27,6 @@ import org.mockito.junit.jupiter.MockitoExtension;
 class WorkerCoordinationServiceTest {
 
   private static final Instant NOW = Instant.parse("2026-03-01T16:00:00Z");
-  private static final Clock CLOCK = Clock.fixed(NOW, ZoneOffset.UTC);
 
   @Mock private WorkerRegistryRepository workerRegistryRepository;
   @Mock private TaskQueueRepository queueRepository;
@@ -59,12 +55,7 @@ class WorkerCoordinationServiceTest {
 
     service =
         new WorkerCoordinationService(
-            workerRegistryRepository,
-            queueRepository,
-            assignmentPlanner,
-            properties,
-            metrics,
-            CLOCK);
+            workerRegistryRepository, queueRepository, assignmentPlanner, properties, metrics);
   }
 
   @Test
@@ -75,7 +66,14 @@ class WorkerCoordinationServiceTest {
             Map.of(
                 1,
                 new WorkerRegistryRepository.PartitionAssignment(
-                    1, "w1", WorkerRegistryRepository.HandoffState.ACTIVE, null, null, null)));
+                    1,
+                    "w1",
+                    WorkerRegistryRepository.HandoffState.ACTIVE,
+                    null,
+                    null,
+                    null,
+                    true,
+                    Duration.ZERO)));
     when(assignmentPlanner.plan(List.of("w1", "w2"), 1, Map.of(1, "w1")))
         .thenReturn(Map.of(1, "w2"));
     when(queueRepository.hasInFlightTasks(1, "w1")).thenReturn(true);
@@ -83,10 +81,9 @@ class WorkerCoordinationServiceTest {
 
     service.rebalance();
 
-    verify(workerRegistryRepository)
-        .startDraining(1, "w2", NOW, NOW.plus(properties.getHandoffDrainTimeout()));
-    verify(workerRegistryRepository, never()).upsertActiveAssignment(eq(1), eq("w2"), any());
-    verify(workerRegistryRepository, never()).completeHandoff(eq(1), eq("w2"), any());
+    verify(workerRegistryRepository).startDraining(1, "w2", properties.getHandoffDrainTimeout());
+    verify(workerRegistryRepository, never()).upsertActiveAssignment(1, "w2");
+    verify(workerRegistryRepository, never()).completeHandoff(1, "w2");
     verify(metrics).handoffStarted();
     verify(metrics).setDrainingAssignments(1);
   }
@@ -95,6 +92,7 @@ class WorkerCoordinationServiceTest {
   void completesDrainingWhenInFlightFinished() {
     Instant startedAt = NOW.minusSeconds(5);
     Instant deadlineAt = NOW.plusSeconds(30);
+    Duration drainDuration = Duration.ofSeconds(5);
     when(workerRegistryRepository.findAllWorkerIdsOrdered()).thenReturn(List.of("w1", "w2"));
     when(workerRegistryRepository.findPartitionAssignments(1))
         .thenReturn(
@@ -106,21 +104,24 @@ class WorkerCoordinationServiceTest {
                     WorkerRegistryRepository.HandoffState.DRAINING,
                     "w2",
                     startedAt,
-                    deadlineAt)));
+                    deadlineAt,
+                    false,
+                    drainDuration)));
     when(assignmentPlanner.plan(List.of("w1", "w2"), 1, Map.of(1, "w1")))
         .thenReturn(Map.of(1, "w2"));
     when(queueRepository.hasInFlightTasks(1, "w1")).thenReturn(false);
 
     service.rebalance();
 
-    verify(workerRegistryRepository).completeHandoff(1, "w2", NOW);
-    verify(metrics).handoffCompleted(Duration.ofSeconds(5));
+    verify(workerRegistryRepository).completeHandoff(1, "w2");
+    verify(metrics).handoffCompleted(drainDuration);
   }
 
   @Test
   void extendsDeadlineOnDrainTimeoutWhenActionIsExtend() {
     Instant startedAt = NOW.minusSeconds(60);
     Instant deadlineAt = NOW.minusSeconds(1);
+    Duration drainDuration = Duration.ofSeconds(60);
     when(workerRegistryRepository.findAllWorkerIdsOrdered()).thenReturn(List.of("w1", "w2"));
     when(workerRegistryRepository.findPartitionAssignments(1))
         .thenReturn(
@@ -132,7 +133,9 @@ class WorkerCoordinationServiceTest {
                     WorkerRegistryRepository.HandoffState.DRAINING,
                     "w2",
                     startedAt,
-                    deadlineAt)));
+                    deadlineAt,
+                    true,
+                    drainDuration)));
     when(assignmentPlanner.plan(List.of("w1", "w2"), 1, Map.of(1, "w1")))
         .thenReturn(Map.of(1, "w2"));
     when(queueRepository.hasInFlightTasks(1, "w1")).thenReturn(true);
@@ -141,10 +144,9 @@ class WorkerCoordinationServiceTest {
 
     verify(metrics).handoffTimeout();
     verify(metrics).handoffTimeoutExtended();
-    verify(workerRegistryRepository)
-        .extendDrainDeadline(1, NOW.plus(properties.getHandoffDrainTimeout()));
+    verify(workerRegistryRepository).extendDrainDeadline(1, properties.getHandoffDrainTimeout());
     verify(workerRegistryRepository, never()).cancelDraining(1);
-    verify(workerRegistryRepository, never()).completeHandoff(eq(1), eq("w2"), any());
+    verify(workerRegistryRepository, never()).completeHandoff(1, "w2");
   }
 
   @Test

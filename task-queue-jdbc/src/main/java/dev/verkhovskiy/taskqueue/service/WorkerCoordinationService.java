@@ -5,9 +5,6 @@ import dev.verkhovskiy.taskqueue.config.TaskQueueProperties;
 import dev.verkhovskiy.taskqueue.metrics.TaskQueueMetrics;
 import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository;
 import dev.verkhovskiy.taskqueue.persistence.WorkerRegistryRepository;
-import java.time.Clock;
-import java.time.Duration;
-import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -25,7 +22,6 @@ public class WorkerCoordinationService {
   private final PartitionAssignmentPlanner assignmentPlanner;
   private final TaskQueueProperties properties;
   private final TaskQueueMetrics metrics;
-  private final Clock clock;
 
   /**
    * Регистрирует воркер и инициирует ребаланс партиций.
@@ -35,9 +31,7 @@ public class WorkerCoordinationService {
   @Transactional(transactionManager = TaskQueueBeanNames.TRANSACTION_MANAGER)
   public void registerWorker(String workerId) {
     try {
-      Instant now = clock.instant();
-      workerRegistryRepository.registerWorker(
-          workerId, properties.getProcessTimeout().toSeconds(), now);
+      workerRegistryRepository.registerWorker(workerId, properties.getProcessTimeout().toSeconds());
       metrics.registerSuccess();
       rebalanceInternal();
     } catch (RuntimeException e) {
@@ -53,7 +47,7 @@ public class WorkerCoordinationService {
    */
   @Transactional(transactionManager = TaskQueueBeanNames.TRANSACTION_MANAGER)
   public void heartbeatWorker(String workerId) {
-    workerRegistryRepository.heartbeatWorker(workerId, clock.instant());
+    workerRegistryRepository.heartbeatWorker(workerId);
   }
 
   /**
@@ -77,10 +71,8 @@ public class WorkerCoordinationService {
   @Transactional(transactionManager = TaskQueueBeanNames.TRANSACTION_MANAGER)
   public int cleanUpDeadWorkers() {
     workerRegistryRepository.lockExclusive(properties.getRebalanceLockKey());
-    Instant now = clock.instant();
     List<String> deadWorkerIds =
         workerRegistryRepository.findExpiredWorkerIdsForUpdate(
-            now,
             properties.getHeartbeatDeviation().toSeconds(),
             properties.getDeadProcessTimeoutMultiplier(),
             properties.getCleanupBatchSize());
@@ -159,8 +151,7 @@ public class WorkerCoordinationService {
             Map<Integer, String> currentOwners = currentOwners(currentAssignments);
             Map<Integer, String> assignmentPlan =
                 assignmentPlanner.plan(workerIds, properties.getPartitionCount(), currentOwners);
-            Instant now = clock.instant();
-            applyAssignmentPlan(assignmentPlan, currentAssignments, now);
+            applyAssignmentPlan(assignmentPlan, currentAssignments);
             metrics.setDrainingAssignments(workerRegistryRepository.countDrainingAssignments());
             return null;
           });
@@ -175,53 +166,50 @@ public class WorkerCoordinationService {
 
   private void applyAssignmentPlan(
       Map<Integer, String> assignmentPlan,
-      Map<Integer, WorkerRegistryRepository.PartitionAssignment> currentAssignments,
-      Instant now) {
+      Map<Integer, WorkerRegistryRepository.PartitionAssignment> currentAssignments) {
     assignmentPlan.forEach(
         (partitionNum, targetWorkerId) -> {
           WorkerRegistryRepository.PartitionAssignment current =
               currentAssignments.get(partitionNum);
           if (current == null) {
-            workerRegistryRepository.upsertActiveAssignment(partitionNum, targetWorkerId, now);
+            workerRegistryRepository.upsertActiveAssignment(partitionNum, targetWorkerId);
             return;
           }
 
           if (!current.draining()) {
-            handleActiveAssignment(partitionNum, targetWorkerId, current, now);
+            handleActiveAssignment(partitionNum, targetWorkerId, current);
             return;
           }
 
-          handleDrainingAssignment(partitionNum, targetWorkerId, current, now);
+          handleDrainingAssignment(partitionNum, targetWorkerId, current);
         });
   }
 
   private void handleActiveAssignment(
       int partitionNum,
       String targetWorkerId,
-      WorkerRegistryRepository.PartitionAssignment current,
-      Instant now) {
+      WorkerRegistryRepository.PartitionAssignment current) {
     if (current.workerId().equals(targetWorkerId)) {
       return;
     }
 
     if (!queueRepository.hasInFlightTasks(partitionNum, current.workerId())) {
-      workerRegistryRepository.upsertActiveAssignment(partitionNum, targetWorkerId, now);
+      workerRegistryRepository.upsertActiveAssignment(partitionNum, targetWorkerId);
       return;
     }
 
-    Instant deadline = now.plus(properties.getHandoffDrainTimeout());
-    workerRegistryRepository.startDraining(partitionNum, targetWorkerId, now, deadline);
+    workerRegistryRepository.startDraining(
+        partitionNum, targetWorkerId, properties.getHandoffDrainTimeout());
     metrics.handoffStarted();
   }
 
   private void handleDrainingAssignment(
       int partitionNum,
       String targetWorkerId,
-      WorkerRegistryRepository.PartitionAssignment current,
-      Instant now) {
+      WorkerRegistryRepository.PartitionAssignment current) {
     if (current.workerId().equals(targetWorkerId)) {
       workerRegistryRepository.cancelDraining(partitionNum);
-      metrics.handoffCancelled(handoffDuration(current.drainStartedAt(), now));
+      metrics.handoffCancelled(current.drainDuration());
       return;
     }
 
@@ -230,29 +218,29 @@ public class WorkerCoordinationService {
     }
 
     if (!queueRepository.hasInFlightTasks(partitionNum, current.workerId())) {
-      workerRegistryRepository.completeHandoff(partitionNum, targetWorkerId, now);
-      metrics.handoffCompleted(handoffDuration(current.drainStartedAt(), now));
+      workerRegistryRepository.completeHandoff(partitionNum, targetWorkerId);
+      metrics.handoffCompleted(current.drainDuration());
       return;
     }
 
-    if (!drainDeadlineReached(current.drainDeadlineAt(), now)) {
+    if (!current.drainDeadlineReached()) {
       return;
     }
 
     metrics.handoffTimeout();
     switch (properties.getHandoffTimeoutAction()) {
       case EXTEND -> {
-        Instant newDeadline = now.plus(properties.getHandoffDrainTimeout());
-        workerRegistryRepository.extendDrainDeadline(partitionNum, newDeadline);
+        workerRegistryRepository.extendDrainDeadline(
+            partitionNum, properties.getHandoffDrainTimeout());
         metrics.handoffTimeoutExtended();
       }
       case ABORT -> {
         workerRegistryRepository.cancelDraining(partitionNum);
-        metrics.handoffTimeoutAborted(handoffDuration(current.drainStartedAt(), now));
+        metrics.handoffTimeoutAborted(current.drainDuration());
       }
       case FORCE -> {
-        workerRegistryRepository.completeHandoff(partitionNum, targetWorkerId, now);
-        metrics.handoffTimeoutForced(handoffDuration(current.drainStartedAt(), now));
+        workerRegistryRepository.completeHandoff(partitionNum, targetWorkerId);
+        metrics.handoffTimeoutForced(current.drainDuration());
       }
     }
   }
@@ -263,16 +251,5 @@ public class WorkerCoordinationService {
     currentAssignments.forEach(
         (partitionNum, assignment) -> owners.put(partitionNum, assignment.workerId()));
     return owners;
-  }
-
-  private static boolean drainDeadlineReached(Instant deadlineAt, Instant now) {
-    return deadlineAt == null || !now.isBefore(deadlineAt);
-  }
-
-  private static Duration handoffDuration(Instant startedAt, Instant endedAt) {
-    if (startedAt == null || endedAt.isBefore(startedAt)) {
-      return Duration.ZERO;
-    }
-    return Duration.between(startedAt, endedAt);
   }
 }

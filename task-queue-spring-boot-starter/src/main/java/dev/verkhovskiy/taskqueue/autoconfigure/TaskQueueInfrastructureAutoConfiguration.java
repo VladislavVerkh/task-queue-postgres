@@ -5,7 +5,6 @@ import dev.verkhovskiy.taskqueue.config.TaskQueueProperties;
 import dev.verkhovskiy.taskqueue.runtime.TaskQueueRuntimeShutdownStrategy;
 import dev.verkhovskiy.taskqueue.service.TaskIdGenerator;
 import dev.verkhovskiy.taskqueue.service.UuidV7TaskIdGenerator;
-import java.time.Clock;
 import java.util.Arrays;
 import java.util.List;
 import javax.sql.DataSource;
@@ -98,13 +97,6 @@ public class TaskQueueInfrastructureAutoConfiguration {
   public NamedParameterJdbcTemplate taskQueueNamedParameterJdbcTemplate(
       @Qualifier(TaskQueueBeanNames.JDBC_TEMPLATE) JdbcTemplate jdbcTemplate) {
     return new NamedParameterJdbcTemplate(jdbcTemplate);
-  }
-
-  /** Создает системные часы UTC для единого источника времени в task-queue. */
-  @Bean
-  @ConditionalOnMissingBean(Clock.class)
-  public Clock taskQueueClock() {
-    return Clock.systemUTC();
   }
 
   /**

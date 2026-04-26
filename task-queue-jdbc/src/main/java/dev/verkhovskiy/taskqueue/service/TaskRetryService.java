@@ -7,8 +7,6 @@ import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository;
 import dev.verkhovskiy.taskqueue.retry.RetryBackoffDecision;
 import dev.verkhovskiy.taskqueue.retry.RetryBackoffPolicy;
 import dev.verkhovskiy.taskqueue.retry.RetryExceptionClassifier;
-import java.time.Clock;
-import java.time.Instant;
 import java.util.UUID;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -28,7 +26,6 @@ public class TaskRetryService {
   private final RetryExceptionClassifier retryExceptionClassifier;
   private final TaskQueueProperties properties;
   private final TaskQueueMetrics metrics;
-  private final Clock clock;
 
   /**
    * Выполняет retry-or-finalize, проверяя что задача все еще закреплена за ожидаемым воркером.
@@ -73,8 +70,7 @@ public class TaskRetryService {
       UUID taskId, long alreadyRetriedCount, String workerId, Throwable failure) {
     RetryBackoffDecision decision = retryBackoffPolicy.nextRetry(alreadyRetriedCount);
     if (decision.shouldRetry()) {
-      Instant availableAt = clock.instant().plusMillis(decision.delayMillis());
-      queueRepository.delayOwnedBy(taskId, workerId, availableAt);
+      queueRepository.delayOwnedBy(taskId, workerId, decision.delayMillis());
       metrics.retryScheduled();
       return decision;
     }
@@ -92,12 +88,7 @@ public class TaskRetryService {
     }
 
     queueRepository.deadLetterOwnedBy(
-        taskId,
-        workerId,
-        deadLetterReason,
-        errorClass(failure),
-        errorMessage(failure),
-        clock.instant());
+        taskId, workerId, deadLetterReason, errorClass(failure), errorMessage(failure));
     metrics.deadLettered();
   }
 

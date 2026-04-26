@@ -36,8 +36,12 @@ public class TaskQueueMetadataRepository {
     int inserted =
         jdbc.update(
             """
+            with runtime_clock as (
+                select clock_timestamp() as now
+            )
             insert into task_queue_metadata(metadata_key, metadata_value, updated_at)
-            values(:key, :value, clock_timestamp())
+            select :key, :value, runtime_clock.now
+              from runtime_clock
             on conflict (metadata_key) do nothing
             """,
             new MapSqlParameterSource().addValue("key", key).addValue("value", value));

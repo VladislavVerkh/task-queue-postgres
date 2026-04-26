@@ -4,9 +4,9 @@ import dev.verkhovskiy.taskqueue.config.TaskQueueBeanNames;
 import dev.verkhovskiy.taskqueue.exception.WorkerRegistrationAlreadyExistsException;
 import dev.verkhovskiy.taskqueue.exception.WorkerRegistrationNotFoundException;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -59,22 +59,22 @@ public class WorkerRegistryRepository {
    *
    * @param workerId идентификатор воркера
    * @param timeoutSeconds таймаут heartbeat в секундах
-   * @param now текущее время
    * @throws WorkerRegistrationAlreadyExistsException если воркер уже зарегистрирован
    */
-  public void registerWorker(String workerId, long timeoutSeconds, Instant now) {
-    OffsetDateTime nowUtc = toOffsetDateTime(now);
+  public void registerWorker(String workerId, long timeoutSeconds) {
     try {
       jdbc.update(
           """
+                with runtime_clock as (
+                    select clock_timestamp() as now
+                )
                 insert into task_worker_registry(worker_id, heartbeat_last, timeout_sec, created_at)
-                values(:workerId, :heartbeatLast, :timeoutSec, :createdAt)
+                select :workerId, runtime_clock.now, :timeoutSec, runtime_clock.now
+                  from runtime_clock
                 """,
           new MapSqlParameterSource()
               .addValue("workerId", workerId)
-              .addValue("heartbeatLast", nowUtc)
-              .addValue("timeoutSec", timeoutSeconds)
-              .addValue("createdAt", nowUtc));
+              .addValue("timeoutSec", timeoutSeconds));
     } catch (DuplicateKeyException e) {
       throw new WorkerRegistrationAlreadyExistsException(workerId);
     }
@@ -84,15 +84,18 @@ public class WorkerRegistryRepository {
    * Обновляет heartbeat воркера.
    *
    * @param workerId идентификатор воркера
-   * @param heartbeatLast текущее значение heartbeat
    * @throws WorkerRegistrationNotFoundException если воркер не найден
    */
-  public void heartbeatWorker(String workerId, Instant heartbeatLast) {
+  public void heartbeatWorker(String workerId) {
     int updated =
         jdbc.update(
             """
+            with runtime_clock as (
+                select clock_timestamp() as now
+            )
             update task_worker_registry
-               set heartbeat_last = clock_timestamp()
+               set heartbeat_last = runtime_clock.now
+              from runtime_clock
              where worker_id = :workerId
             """,
             new MapSqlParameterSource().addValue("workerId", workerId));
@@ -104,23 +107,26 @@ public class WorkerRegistryRepository {
   /**
    * Возвращает список просроченных воркеров и блокирует выбранные строки.
    *
-   * @param now текущее время
    * @param heartbeatDeviationSec допустимое отклонение heartbeat в секундах
    * @param timeoutMultiplier множитель timeout-а из конфигурации воркера
    * @param limit максимум возвращаемых воркеров
    * @return список идентификаторов "мертвых" воркеров
    */
   public List<String> findExpiredWorkerIdsForUpdate(
-      Instant now, long heartbeatDeviationSec, int timeoutMultiplier, int limit) {
+      long heartbeatDeviationSec, int timeoutMultiplier, int limit) {
     return jdbc.query(
         """
-            select worker_id
-              from task_worker_registry
-             where heartbeat_last < clock_timestamp()
-                                   - make_interval(secs => timeout_sec * :timeoutMultiplier)
-                                   - make_interval(secs => :heartbeatDeviationSec)
-             order by heartbeat_last
-             for update skip locked
+            with runtime_clock as (
+                select clock_timestamp() as now
+            )
+            select w.worker_id
+              from task_worker_registry w
+             cross join runtime_clock
+             where w.heartbeat_last < runtime_clock.now
+                                     - make_interval(secs => w.timeout_sec * :timeoutMultiplier)
+                                     - make_interval(secs => :heartbeatDeviationSec)
+             order by w.heartbeat_last
+             for update of w skip locked
              limit :limit
             """,
         new MapSqlParameterSource()
@@ -156,15 +162,30 @@ public class WorkerRegistryRepository {
   public Map<Integer, PartitionAssignment> findPartitionAssignments(int maxPartitionNum) {
     return jdbc.query(
         """
-            select partition_num,
-                   worker_id,
-                   handoff_state,
-                   pending_worker_id,
-                   drain_started_at,
-                   drain_deadline_at
-              from task_worker_partition_assignment
-             where partition_num <= :maxPartitionNum
-             order by partition_num
+            with runtime_clock as (
+                select clock_timestamp() as now
+            )
+            select a.partition_num,
+                   a.worker_id,
+                   a.handoff_state,
+                   a.pending_worker_id,
+                   a.drain_started_at,
+                   a.drain_deadline_at,
+                   (
+                       a.drain_deadline_at is null
+                       or runtime_clock.now >= a.drain_deadline_at
+                   ) as drain_deadline_reached,
+                   coalesce(
+                       greatest(
+                           (extract(epoch from runtime_clock.now - a.drain_started_at) * 1000)::bigint,
+                           0::bigint
+                       ),
+                       0
+                   ) as drain_duration_millis
+              from task_worker_partition_assignment a
+             cross join runtime_clock
+             where a.partition_num <= :maxPartitionNum
+             order by a.partition_num
             """,
         new MapSqlParameterSource("maxPartitionNum", maxPartitionNum),
         rs -> {
@@ -179,7 +200,9 @@ public class WorkerRegistryRepository {
                     HandoffState.fromDbValue(rs.getString("handoff_state")),
                     rs.getString("pending_worker_id"),
                     toInstant(rs.getObject("drain_started_at", OffsetDateTime.class)),
-                    toInstant(rs.getObject("drain_deadline_at", OffsetDateTime.class))));
+                    toInstant(rs.getObject("drain_deadline_at", OffsetDateTime.class)),
+                    rs.getBoolean("drain_deadline_reached"),
+                    Duration.ofMillis(rs.getLong("drain_duration_millis"))));
           }
           return result;
         });
@@ -190,9 +213,12 @@ public class WorkerRegistryRepository {
    *
    * <p>Если владелец меняется, увеличивает owner_change_count и обновляет owner_changed_at.
    */
-  public void upsertActiveAssignment(int partitionNum, String workerId, Instant ownerChangedAt) {
+  public void upsertActiveAssignment(int partitionNum, String workerId) {
     jdbc.update(
         """
+            with runtime_clock as (
+                select clock_timestamp() as now
+            )
             insert into task_worker_partition_assignment(
                 partition_num,
                 worker_id,
@@ -203,16 +229,16 @@ public class WorkerRegistryRepository {
                 owner_changed_at,
                 owner_change_count
             )
-            values(
+            select
                 :partitionNum,
                 :workerId,
                 'ACTIVE',
                 null,
                 null,
                 null,
-                :ownerChangedAt,
+                runtime_clock.now,
                 1
-            )
+              from runtime_clock
             on conflict (partition_num)
             do update
                   set worker_id = excluded.worker_id,
@@ -223,7 +249,7 @@ public class WorkerRegistryRepository {
                       owner_changed_at =
                           case
                               when task_worker_partition_assignment.worker_id is distinct from excluded.worker_id
-                              then :ownerChangedAt
+                              then excluded.owner_changed_at
                               else task_worker_partition_assignment.owner_changed_at
                           end,
                       owner_change_count =
@@ -235,27 +261,29 @@ public class WorkerRegistryRepository {
             """,
         new MapSqlParameterSource()
             .addValue("partitionNum", partitionNum)
-            .addValue("workerId", workerId)
-            .addValue("ownerChangedAt", toOffsetDateTime(ownerChangedAt)));
+            .addValue("workerId", workerId));
   }
 
   /** Переводит assignment партиции в состояние DRAINING. */
-  public void startDraining(
-      int partitionNum, String pendingWorkerId, Instant startedAt, Instant deadlineAt) {
+  public void startDraining(int partitionNum, String pendingWorkerId, Duration drainTimeout) {
     jdbc.update(
         """
-            update task_worker_partition_assignment
+            with runtime_clock as (
+                select clock_timestamp() as now
+            )
+            update task_worker_partition_assignment a
                set handoff_state = 'DRAINING',
                    pending_worker_id = :pendingWorkerId,
-                   drain_started_at = :startedAt,
-                   drain_deadline_at = :deadlineAt
-             where partition_num = :partitionNum
+                   drain_started_at = runtime_clock.now,
+                   drain_deadline_at =
+                       runtime_clock.now + (:drainTimeoutMillis * interval '1 millisecond')
+              from runtime_clock
+             where a.partition_num = :partitionNum
             """,
         new MapSqlParameterSource()
             .addValue("partitionNum", partitionNum)
             .addValue("pendingWorkerId", pendingWorkerId)
-            .addValue("startedAt", toOffsetDateTime(startedAt))
-            .addValue("deadlineAt", toOffsetDateTime(deadlineAt)));
+            .addValue("drainTimeoutMillis", Math.max(1L, drainTimeout.toMillis())));
   }
 
   /** Обновляет pending-owner для уже начатого дренажа. */
@@ -272,16 +300,21 @@ public class WorkerRegistryRepository {
   }
 
   /** Продлевает дедлайн дренажа для партиции. */
-  public void extendDrainDeadline(int partitionNum, Instant deadlineAt) {
+  public void extendDrainDeadline(int partitionNum, Duration drainTimeout) {
     jdbc.update(
         """
+            with runtime_clock as (
+                select clock_timestamp() as now
+            )
             update task_worker_partition_assignment
-               set drain_deadline_at = :deadlineAt
+               set drain_deadline_at =
+                       runtime_clock.now + (:drainTimeoutMillis * interval '1 millisecond')
+              from runtime_clock
              where partition_num = :partitionNum
             """,
         new MapSqlParameterSource()
             .addValue("partitionNum", partitionNum)
-            .addValue("deadlineAt", toOffsetDateTime(deadlineAt)));
+            .addValue("drainTimeoutMillis", Math.max(1L, drainTimeout.toMillis())));
   }
 
   /** Отменяет handoff и возвращает assignment в ACTIVE у текущего владельца. */
@@ -299,9 +332,12 @@ public class WorkerRegistryRepository {
   }
 
   /** Завершает handoff партиции на нового владельца. */
-  public void completeHandoff(int partitionNum, String newWorkerId, Instant ownerChangedAt) {
+  public void completeHandoff(int partitionNum, String newWorkerId) {
     jdbc.update(
         """
+            with runtime_clock as (
+                select clock_timestamp() as now
+            )
             update task_worker_partition_assignment
                set worker_id = :newWorkerId,
                    handoff_state = 'ACTIVE',
@@ -311,7 +347,7 @@ public class WorkerRegistryRepository {
                    owner_changed_at =
                        case
                            when worker_id is distinct from :newWorkerId
-                           then :ownerChangedAt
+                           then runtime_clock.now
                            else owner_changed_at
                        end,
                    owner_change_count =
@@ -320,12 +356,12 @@ public class WorkerRegistryRepository {
                            then owner_change_count + 1
                            else owner_change_count
                        end
+              from runtime_clock
              where partition_num = :partitionNum
             """,
         new MapSqlParameterSource()
             .addValue("partitionNum", partitionNum)
-            .addValue("newWorkerId", newWorkerId)
-            .addValue("ownerChangedAt", toOffsetDateTime(ownerChangedAt)));
+            .addValue("newWorkerId", newWorkerId));
   }
 
   /** Возвращает количество партиций в состоянии DRAINING. */
@@ -369,17 +405,6 @@ public class WorkerRegistryRepository {
         new MapSqlParameterSource("maxPartitionNum", maxPartitionNum));
   }
 
-  /**
-   * Преобразует {@link Instant} в {@link OffsetDateTime} UTC для корректного биндинга в PostgreSQL
-   * timestamptz через JDBC-драйвер.
-   *
-   * @param instant момент времени
-   * @return момент времени в представлении offset date-time (UTC)
-   */
-  private static OffsetDateTime toOffsetDateTime(Instant instant) {
-    return OffsetDateTime.ofInstant(instant, ZoneOffset.UTC);
-  }
-
   private static Instant toInstant(OffsetDateTime value) {
     return value == null ? null : value.toInstant();
   }
@@ -403,6 +428,8 @@ public class WorkerRegistryRepository {
    * @param pendingWorkerId ожидающий владелец при DRAINING
    * @param drainStartedAt время старта дренажа
    * @param drainDeadlineAt дедлайн дренажа
+   * @param drainDeadlineReached {@code true}, если PostgreSQL-время достигло дедлайна дренажа
+   * @param drainDuration длительность дренажа относительно текущего PostgreSQL-времени
    */
   public record PartitionAssignment(
       int partitionNum,
@@ -410,7 +437,9 @@ public class WorkerRegistryRepository {
       HandoffState handoffState,
       String pendingWorkerId,
       Instant drainStartedAt,
-      Instant drainDeadlineAt) {
+      Instant drainDeadlineAt,
+      boolean drainDeadlineReached,
+      Duration drainDuration) {
 
     /** Возвращает {@code true}, если партиция находится в DRAINING. */
     public boolean draining() {

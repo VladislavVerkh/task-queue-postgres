@@ -111,9 +111,8 @@ class TaskQueueIntegrationTest {
 
     int partitionOwnedByDeadWorker = loadAssignedPartitionsOfSecondPodFirstWorker().getFirst();
     UUID taskId = UUID.randomUUID();
-    Instant now = Instant.now();
     queueRepository.enqueue(
-        taskId, "integration-test", "{}", "k", partitionOwnedByDeadWorker, now, now);
+        taskId, "integration-test", "{}", "k", partitionOwnedByDeadWorker, Instant.now());
 
     List<QueuedTask> lockedTasks = queueService.dequeueForWorker(P2W1, 1);
     assertEquals(1, lockedTasks.size());
@@ -144,8 +143,7 @@ class TaskQueueIntegrationTest {
     workerCoordinationService.registerWorker(P1W1);
 
     UUID taskId = UUID.randomUUID();
-    Instant now = Instant.now();
-    queueRepository.enqueue(taskId, "integration-test", "{}", "k", 1, now, now);
+    queueRepository.enqueue(taskId, "integration-test", "{}", "k", 1, Instant.now());
 
     List<QueuedTask> lockedTasks = queueService.dequeueForWorker(P1W1, 1);
     assertEquals(1, lockedTasks.size());
@@ -170,8 +168,7 @@ class TaskQueueIntegrationTest {
     workerCoordinationService.registerWorker(P1W1);
 
     UUID taskId = UUID.randomUUID();
-    Instant now = Instant.now();
-    queueRepository.enqueue(taskId, "integration-test", "{}", "k", 1, now, now);
+    queueRepository.enqueue(taskId, "integration-test", "{}", "k", 1, Instant.now());
 
     List<QueuedTask> lockedTasks = queueService.dequeueForWorker(P1W1, 1);
     assertEquals(1, lockedTasks.size());
@@ -204,8 +201,7 @@ class TaskQueueIntegrationTest {
     workerCoordinationService.registerWorker(P1W1);
 
     UUID taskId = UUID.randomUUID();
-    Instant now = Instant.now();
-    queueRepository.enqueue(taskId, "integration-test", "{}", "k", 1, now, now);
+    queueRepository.enqueue(taskId, "integration-test", "{}", "k", 1, Instant.now());
 
     List<QueuedTask> lockedTasks = queueService.dequeueForWorker(P1W1, 1);
     assertEquals(1, lockedTasks.size());
@@ -228,8 +224,7 @@ class TaskQueueIntegrationTest {
     workerCoordinationService.registerWorker(P2W1);
 
     UUID taskId = UUID.randomUUID();
-    Instant now = Instant.now();
-    queueRepository.enqueue(taskId, "integration-test", "{}", "k", 1, now, now);
+    queueRepository.enqueue(taskId, "integration-test", "{}", "k", 1, Instant.now());
     setTaskOwner(taskId, P2W1);
     RuntimeException failure = new RuntimeException("boom");
 
@@ -250,8 +245,7 @@ class TaskQueueIntegrationTest {
     workerCoordinationService.registerWorker(P1W1);
 
     UUID taskId = UUID.randomUUID();
-    Instant now = Instant.now();
-    queueRepository.enqueue(taskId, "integration-test", "{}", "k", 1, now, now);
+    queueRepository.enqueue(taskId, "integration-test", "{}", "k", 1, Instant.now());
 
     List<QueuedTask> lockedTasks = queueService.dequeueForWorker(P1W1, 1);
     assertEquals(1, lockedTasks.size());
@@ -300,8 +294,7 @@ class TaskQueueIntegrationTest {
     workerCoordinationService.registerWorker(P1W1);
 
     UUID taskId = UUID.randomUUID();
-    Instant now = Instant.now();
-    queueRepository.enqueue(taskId, "integration-test", "{}", "k", 1, now, now);
+    queueRepository.enqueue(taskId, "integration-test", "{}", "k", 1, Instant.now());
 
     List<QueuedTask> lockedTasks = queueService.dequeueForWorker(P1W1, 1);
     assertEquals(1, lockedTasks.size());

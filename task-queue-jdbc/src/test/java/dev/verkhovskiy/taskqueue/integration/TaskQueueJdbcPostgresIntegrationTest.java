@@ -28,7 +28,6 @@ import dev.verkhovskiy.taskqueue.service.TaskRetryService;
 import dev.verkhovskiy.taskqueue.service.UuidV7TaskIdGenerator;
 import dev.verkhovskiy.taskqueue.service.WorkerCoordinationService;
 import dev.verkhovskiy.taskqueue.testkit.TaskQueuePostgresContainerSupport;
-import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -125,9 +124,9 @@ class TaskQueueJdbcPostgresIntegrationTest {
     assertTrue(queueStateMetrics.oldestInFlightAgeSeconds() >= 0);
 
     List<PartitionLagMetrics> partitionLagMetrics = queueRepository.loadPartitionLagMetrics(2);
-    assertEquals(2, partitionLagMetrics.size());
+    assertEquals(1, partitionLagMetrics.size());
+    assertEquals(1, partitionLagMetrics.getFirst().partitionNum());
     assertEquals(1, partitionLagMetrics.get(0).readyTasks());
-    assertEquals(0, partitionLagMetrics.get(1).readyTasks());
   }
 
   @Test
@@ -176,7 +175,7 @@ class TaskQueueJdbcPostgresIntegrationTest {
 
   private UUID enqueueTask(String partitionKey, int partitionNum, Instant now) {
     UUID taskId = UUID.randomUUID();
-    queueRepository.enqueue(taskId, "integration-test", "{}", partitionKey, partitionNum, now, now);
+    queueRepository.enqueue(taskId, "integration-test", "{}", partitionKey, partitionNum, now);
     return taskId;
   }
 
@@ -285,11 +284,6 @@ class TaskQueueJdbcPostgresIntegrationTest {
     @Bean(name = TaskQueueBeanNames.TRANSACTION_MANAGER)
     PlatformTransactionManager taskQueueTransactionManager(DataSource dataSource) {
       return new DataSourceTransactionManager(dataSource);
-    }
-
-    @Bean
-    Clock taskQueueClock() {
-      return Clock.systemUTC();
     }
 
     @Bean

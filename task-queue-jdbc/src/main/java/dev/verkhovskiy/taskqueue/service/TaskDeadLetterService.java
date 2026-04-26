@@ -4,7 +4,6 @@ import dev.verkhovskiy.taskqueue.config.TaskQueueBeanNames;
 import dev.verkhovskiy.taskqueue.config.TaskQueueProperties;
 import dev.verkhovskiy.taskqueue.metrics.TaskQueueMetrics;
 import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository;
-import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
@@ -20,7 +19,6 @@ public class TaskDeadLetterService {
   private final TaskQueueRepository queueRepository;
   private final TaskQueueProperties properties;
   private final TaskQueueMetrics metrics;
-  private final Clock clock;
 
   /**
    * Возвращает dead-letter задачу в основную очередь с доступностью "сейчас".
@@ -30,7 +28,7 @@ public class TaskDeadLetterService {
    */
   @Transactional(transactionManager = TaskQueueBeanNames.TRANSACTION_MANAGER)
   public boolean requeue(UUID taskId) {
-    return requeue(taskId, clock.instant());
+    return requeue(taskId, null);
   }
 
   /**
@@ -60,7 +58,10 @@ public class TaskDeadLetterService {
     if (retention == null || retention.isZero() || retention.isNegative()) {
       return 0;
     }
-    return deleteOlderThan(clock.instant().minus(retention), properties.getCleanupBatchSize());
+    int deleted =
+        queueRepository.deleteDeadLettersOlderThan(retention, properties.getCleanupBatchSize());
+    metrics.deadLetterDeleted(deleted);
+    return deleted;
   }
 
   /**

@@ -1,7 +1,7 @@
 package dev.verkhovskiy.taskqueue.service;
 
 import dev.verkhovskiy.taskqueue.domain.TaskEnqueueRequest;
-import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
 import lombok.RequiredArgsConstructor;
@@ -13,7 +13,6 @@ import org.springframework.stereotype.Service;
 public class TaskProducerService implements TaskProducer {
 
   private final TaskQueueService queueService;
-  private final Clock clock;
 
   /**
    * Добавляет задачу в очередь с моментом доступности "сейчас".
@@ -26,8 +25,22 @@ public class TaskProducerService implements TaskProducer {
   @SuppressWarnings("unused")
   @Override
   public UUID enqueue(String taskType, String partitionKey, String payload) {
+    return queueService.enqueue(new TaskEnqueueRequest(taskType, partitionKey, payload, null));
+  }
+
+  /**
+   * Добавляет задачу в очередь с задержкой относительно времени PostgreSQL.
+   *
+   * @param taskType тип задачи
+   * @param partitionKey ключ партиционирования
+   * @param payload полезная нагрузка
+   * @param delay задержка до доступности задачи
+   * @return идентификатор созданной задачи
+   */
+  @Override
+  public UUID enqueueDelayed(String taskType, String partitionKey, String payload, Duration delay) {
     return queueService.enqueue(
-        new TaskEnqueueRequest(taskType, partitionKey, payload, clock.instant()));
+        new TaskEnqueueRequest(taskType, partitionKey, payload, null), delay);
   }
 
   /**

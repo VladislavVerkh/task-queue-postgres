@@ -10,10 +10,7 @@ import static org.mockito.Mockito.when;
 import dev.verkhovskiy.taskqueue.config.TaskQueueProperties;
 import dev.verkhovskiy.taskqueue.metrics.TaskQueueMetrics;
 import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository;
-import java.time.Clock;
 import java.time.Duration;
-import java.time.Instant;
-import java.time.ZoneOffset;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -24,9 +21,6 @@ import org.mockito.junit.jupiter.MockitoExtension;
 @ExtendWith(MockitoExtension.class)
 class TaskDeadLetterServiceTest {
 
-  private static final Instant NOW = Instant.parse("2026-01-01T10:00:00Z");
-  private static final Clock CLOCK = Clock.fixed(NOW, ZoneOffset.UTC);
-
   @Mock private TaskQueueRepository queueRepository;
   @Mock private TaskQueueMetrics metrics;
 
@@ -36,13 +30,13 @@ class TaskDeadLetterServiceTest {
   @BeforeEach
   void setUp() {
     properties = new TaskQueueProperties();
-    service = new TaskDeadLetterService(queueRepository, properties, metrics, CLOCK);
+    service = new TaskDeadLetterService(queueRepository, properties, metrics);
   }
 
   @Test
   void requeueMovesDeadLetterToQueue() {
     UUID taskId = UUID.randomUUID();
-    when(queueRepository.requeueDeadLetter(taskId, NOW)).thenReturn(true);
+    when(queueRepository.requeueDeadLetter(taskId, null)).thenReturn(true);
 
     assertTrue(service.requeue(taskId));
 
@@ -52,7 +46,7 @@ class TaskDeadLetterServiceTest {
   @Test
   void requeueDoesNotIncrementMetricWhenTaskIsMissing() {
     UUID taskId = UUID.randomUUID();
-    when(queueRepository.requeueDeadLetter(taskId, NOW)).thenReturn(false);
+    when(queueRepository.requeueDeadLetter(taskId, null)).thenReturn(false);
 
     assertFalse(service.requeue(taskId));
 
@@ -63,8 +57,7 @@ class TaskDeadLetterServiceTest {
   void deleteExpiredUsesRetentionAndBatchSize() {
     properties.setDeadLetterRetention(Duration.ofDays(7));
     properties.setCleanupBatchSize(100);
-    when(queueRepository.deleteDeadLettersOlderThan(NOW.minus(Duration.ofDays(7)), 100))
-        .thenReturn(5);
+    when(queueRepository.deleteDeadLettersOlderThan(Duration.ofDays(7), 100)).thenReturn(5);
 
     assertEquals(5, service.deleteExpired());
 
@@ -75,6 +68,6 @@ class TaskDeadLetterServiceTest {
   void deleteExpiredIsDisabledWhenRetentionIsZero() {
     assertEquals(0, service.deleteExpired());
 
-    verify(queueRepository, never()).deleteDeadLettersOlderThan(NOW, 32);
+    verify(queueRepository, never()).deleteDeadLettersOlderThan(Duration.ZERO, 32);
   }
 }

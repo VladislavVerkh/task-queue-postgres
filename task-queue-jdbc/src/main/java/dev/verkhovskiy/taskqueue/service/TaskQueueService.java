@@ -6,8 +6,7 @@ import dev.verkhovskiy.taskqueue.domain.QueuedTask;
 import dev.verkhovskiy.taskqueue.domain.TaskEnqueueRequest;
 import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository;
 import dev.verkhovskiy.taskqueue.persistence.WorkerRegistryRepository;
-import java.time.Clock;
-import java.time.Instant;
+import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
 import lombok.RequiredArgsConstructor;
@@ -19,11 +18,13 @@ import org.springframework.transaction.annotation.Transactional;
 @RequiredArgsConstructor
 public class TaskQueueService {
 
+  private static final int MAX_TASK_TYPE_LENGTH = 128;
+  private static final int MAX_PARTITION_KEY_LENGTH = 512;
+
   private final TaskQueueRepository queueRepository;
   private final WorkerRegistryRepository workerRegistryRepository;
   private final TaskPartitioner partitioner;
   private final TaskQueueProperties properties;
-  private final Clock clock;
   private final TaskIdGenerator taskIdGenerator;
 
   /**
@@ -34,26 +35,30 @@ public class TaskQueueService {
    */
   @Transactional(transactionManager = TaskQueueBeanNames.TRANSACTION_MANAGER)
   public UUID enqueue(TaskEnqueueRequest request) {
-    if (request.taskType() == null || request.taskType().isBlank()) {
-      throw new IllegalArgumentException("taskType must be set");
-    }
-    if (request.payload() == null) {
-      throw new IllegalArgumentException("payload must be set");
-    }
+    return enqueue(request, null);
+  }
 
-    Instant now = clock.instant();
+  /**
+   * Ставит задачу в очередь с задержкой относительно времени PostgreSQL.
+   *
+   * @param request данные задачи
+   * @param availableAfter задержка до доступности задачи
+   * @return идентификатор созданной задачи
+   */
+  @Transactional(transactionManager = TaskQueueBeanNames.TRANSACTION_MANAGER)
+  public UUID enqueue(TaskEnqueueRequest request, Duration availableAfter) {
+    validateEnqueueRequest(request, availableAfter);
     UUID taskId = taskIdGenerator.next();
     int partitionNum =
         partitioner.partition(request.partitionKey(), properties.getPartitionCount());
-    Instant availableAt = request.availableAt() == null ? now : request.availableAt();
     queueRepository.enqueue(
         taskId,
         request.taskType(),
         request.payload(),
         request.partitionKey(),
         partitionNum,
-        availableAt,
-        now);
+        request.availableAt(),
+        availableAfter);
     return taskId;
   }
 
@@ -66,6 +71,10 @@ public class TaskQueueService {
    */
   @Transactional(transactionManager = TaskQueueBeanNames.TRANSACTION_MANAGER)
   public List<QueuedTask> dequeueForWorker(String workerId, int maxCount) {
+    requireWorkerId(workerId);
+    if (maxCount <= 0) {
+      throw new IllegalArgumentException("maxCount must be greater than 0");
+    }
     workerRegistryRepository.lockShared(properties.getRebalanceLockKey());
     return queueRepository.lockNextTasksForWorker(
         workerId,
@@ -96,6 +105,32 @@ public class TaskQueueService {
   public void renewLease(UUID taskId, String workerId) {
     requireWorkerId(workerId);
     queueRepository.renewLeaseOwnedBy(taskId, workerId, properties.getTaskLeaseTimeout());
+  }
+
+  private static void validateEnqueueRequest(TaskEnqueueRequest request, Duration availableAfter) {
+    if (request == null) {
+      throw new IllegalArgumentException("request must be set");
+    }
+    if (request.taskType() == null || request.taskType().isBlank()) {
+      throw new IllegalArgumentException("taskType must be set");
+    }
+    if (request.taskType().length() > MAX_TASK_TYPE_LENGTH) {
+      throw new IllegalArgumentException("taskType length must be <= " + MAX_TASK_TYPE_LENGTH);
+    }
+    if (request.partitionKey() != null
+        && request.partitionKey().length() > MAX_PARTITION_KEY_LENGTH) {
+      throw new IllegalArgumentException(
+          "partitionKey length must be <= " + MAX_PARTITION_KEY_LENGTH);
+    }
+    if (request.payload() == null) {
+      throw new IllegalArgumentException("payload must be set");
+    }
+    if (request.availableAt() != null && availableAfter != null) {
+      throw new IllegalArgumentException("availableAt and availableAfter cannot both be set");
+    }
+    if (availableAfter != null && availableAfter.isNegative()) {
+      throw new IllegalArgumentException("availableAfter must be greater than or equal to 0");
+    }
   }
 
   private static void requireWorkerId(String workerId) {

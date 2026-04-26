@@ -43,8 +43,29 @@ public class TaskQueueRepository {
    * @param payload полезная нагрузка задачи
    * @param partitionKey ключ партиционирования
    * @param partitionNum номер партиции
-   * @param availableAt момент, когда задача станет доступна для обработки
-   * @param createdAt момент создания записи
+   * @param availableAt момент, когда задача станет доступна для обработки, или {@code null} для
+   *     текущего времени PostgreSQL
+   */
+  public void enqueue(
+      UUID taskId,
+      String taskType,
+      String payload,
+      String partitionKey,
+      int partitionNum,
+      Instant availableAt) {
+    enqueue(taskId, taskType, payload, partitionKey, partitionNum, availableAt, null);
+  }
+
+  /**
+   * Добавляет новую задачу в очередь.
+   *
+   * @param taskId идентификатор задачи
+   * @param taskType тип задачи
+   * @param payload полезная нагрузка задачи
+   * @param partitionKey ключ партиционирования
+   * @param partitionNum номер партиции
+   * @param availableAt абсолютный момент доступности, или {@code null}
+   * @param availableAfter задержка относительно времени PostgreSQL, или {@code null}
    */
   public void enqueue(
       UUID taskId,
@@ -53,9 +74,12 @@ public class TaskQueueRepository {
       String partitionKey,
       int partitionNum,
       Instant availableAt,
-      Instant createdAt) {
+      Duration availableAfter) {
     jdbc.update(
         """
+            with runtime_clock as (
+                select clock_timestamp() as now
+            )
             insert into task_queue(
                 task_id,
                 task_type,
@@ -67,17 +91,24 @@ public class TaskQueueRepository {
                 worker_id,
                 created_at
             )
-            values(
+            select
                 :taskId,
                 :taskType,
                 :payload,
                 :partitionKey,
                 :partitionNum,
-                :availableAt,
+                coalesce(
+                    cast(:availableAt as timestamptz),
+                    case
+                        when :availableAfterSet
+                        then runtime_clock.now + (:availableAfterMillis * interval '1 millisecond')
+                        else runtime_clock.now
+                    end
+                ),
                 0,
                 null,
-                :createdAt
-            )
+                runtime_clock.now
+              from runtime_clock
             """,
         new MapSqlParameterSource()
             .addValue("taskId", taskId)
@@ -86,7 +117,10 @@ public class TaskQueueRepository {
             .addValue("partitionKey", partitionKey)
             .addValue("partitionNum", partitionNum)
             .addValue("availableAt", toOffsetDateTime(availableAt))
-            .addValue("createdAt", toOffsetDateTime(createdAt)));
+            .addValue("availableAfterSet", availableAfter != null)
+            .addValue(
+                "availableAfterMillis",
+                availableAfter == null ? 0L : Math.max(0L, availableAfter.toMillis())));
   }
 
   /**
@@ -172,26 +206,31 @@ public class TaskQueueRepository {
    *
    * @param taskId идентификатор задачи
    * @param workerId идентификатор воркера-владельца
-   * @param availableAt время следующей доступности задачи
+   * @param delayMillis задержка до следующей доступности задачи
    * @throws TaskOwnershipLostException если задача отсутствует или закреплена за другим воркером
    */
-  public void delayOwnedBy(UUID taskId, String workerId, Instant availableAt) {
+  public void delayOwnedBy(UUID taskId, String workerId, long delayMillis) {
     int updated =
         jdbc.update(
             """
+            with runtime_clock as (
+                select clock_timestamp() as now
+            )
             update task_queue
-               set available_at = :availableAt,
+               set available_at =
+                       runtime_clock.now + (:delayMillis * interval '1 millisecond'),
                    delay_count = delay_count + 1,
                    worker_id = null,
                    locked_at = null,
                    lease_until = null
+              from runtime_clock
              where task_id = :taskId
                and worker_id = :workerId
             """,
             new MapSqlParameterSource()
                 .addValue("taskId", taskId)
                 .addValue("workerId", workerId)
-                .addValue("availableAt", toOffsetDateTime(availableAt)));
+                .addValue("delayMillis", Math.max(0L, delayMillis)));
     if (updated == 0) {
       throw new TaskOwnershipLostException(taskId, workerId);
     }
@@ -209,9 +248,13 @@ public class TaskQueueRepository {
     int updated =
         jdbc.update(
             """
+            with runtime_clock as (
+                select clock_timestamp() as now
+            )
             update task_queue
                set lease_until =
-                       clock_timestamp() + (:leaseTimeoutMillis * interval '1 millisecond')
+                       runtime_clock.now + (:leaseTimeoutMillis * interval '1 millisecond')
+              from runtime_clock
              where task_id = :taskId
                and worker_id = :workerId
             """,
@@ -233,19 +276,16 @@ public class TaskQueueRepository {
    * @param reason причина финализации задачи
    * @param errorClass класс последней ошибки
    * @param errorMessage сообщение последней ошибки
-   * @param deadLetteredAt время переноса в dead-letter
    * @throws TaskOwnershipLostException если задача отсутствует или закреплена за другим воркером
    */
   public void deadLetterOwnedBy(
-      UUID taskId,
-      String workerId,
-      String reason,
-      String errorClass,
-      String errorMessage,
-      Instant deadLetteredAt) {
+      UUID taskId, String workerId, String reason, String errorClass, String errorMessage) {
     int inserted =
         jdbc.update(
             """
+            with runtime_clock as (
+                select clock_timestamp() as now
+            )
             insert into task_queue_dead_letter(
                 task_id,
                 task_type,
@@ -273,8 +313,9 @@ public class TaskQueueRepository {
                    :errorClass,
                    :errorMessage,
                    q.created_at,
-                   :deadLetteredAt
+                   runtime_clock.now
               from task_queue q
+             cross join runtime_clock
              where q.task_id = :taskId
                and q.worker_id = :workerId
             on conflict (task_id)
@@ -297,8 +338,7 @@ public class TaskQueueRepository {
                 .addValue("workerId", workerId)
                 .addValue("reason", reason)
                 .addValue("errorClass", errorClass)
-                .addValue("errorMessage", errorMessage)
-                .addValue("deadLetteredAt", toOffsetDateTime(deadLetteredAt)));
+                .addValue("errorMessage", errorMessage));
     if (inserted == 0) {
       throw new TaskOwnershipLostException(taskId, workerId);
     }
@@ -309,7 +349,8 @@ public class TaskQueueRepository {
    * Возвращает dead-letter задачу в основную очередь.
    *
    * @param taskId идентификатор dead-letter задачи
-   * @param availableAt время, когда задача станет доступна для обработки
+   * @param availableAt время, когда задача станет доступна для обработки, или {@code null} для
+   *     текущего времени PostgreSQL
    * @return {@code true}, если задача перенесена в основную очередь
    */
   public boolean requeueDeadLetter(UUID taskId, Instant availableAt) {
@@ -325,6 +366,9 @@ public class TaskQueueRepository {
                        original_created_at
                   from task_queue_dead_letter
                  where task_id = :taskId
+            ),
+            runtime_clock as (
+                select clock_timestamp() as now
             ),
             inserted as (
                 insert into task_queue(
@@ -345,13 +389,14 @@ public class TaskQueueRepository {
                        payload,
                        partition_key,
                        partition_num,
-                       :availableAt,
+                       coalesce(cast(:availableAt as timestamptz), runtime_clock.now),
                        0,
                        null,
                        original_created_at,
                        null,
                        null
                   from candidate
+                 cross join runtime_clock
                 on conflict (task_id) do nothing
                 returning task_id
             ),
@@ -397,6 +442,37 @@ public class TaskQueueRepository {
   }
 
   /**
+   * Удаляет dead-letter записи старше retention относительно текущего времени PostgreSQL.
+   *
+   * @param retention сколько хранить dead-letter записи
+   * @param limit максимальное количество удаляемых записей
+   * @return количество удаленных записей
+   */
+  public int deleteDeadLettersOlderThan(Duration retention, int limit) {
+    return jdbc.update(
+        """
+            with runtime_clock as (
+                select clock_timestamp() as now
+            ),
+            expired as (
+                select task_id
+                  from task_queue_dead_letter
+                 cross join runtime_clock
+                 where dead_lettered_at <
+                       runtime_clock.now - (:retentionMillis * interval '1 millisecond')
+                 order by dead_lettered_at, task_id
+                 limit :limit
+            )
+            delete from task_queue_dead_letter dl
+             using expired e
+             where dl.task_id = e.task_id
+            """,
+        new MapSqlParameterSource()
+            .addValue("retentionMillis", Math.max(0L, retention.toMillis()))
+            .addValue("limit", limit));
+  }
+
+  /**
    * Снимает закрепление всех задач, ранее взятых конкретным воркером.
    *
    * @param workerId идентификатор воркера
@@ -422,14 +498,18 @@ public class TaskQueueRepository {
   public int releaseExpiredTaskLeases(int limit) {
     return jdbc.update(
         """
-            with expired as (
-                select task_id
-                  from task_queue
-                 where worker_id is not null
-                   and lease_until is not null
-                   and lease_until < clock_timestamp()
-                 order by lease_until, task_id
-                 for update skip locked
+            with runtime_clock as (
+                select clock_timestamp() as now
+            ),
+            expired as (
+                select q.task_id
+                  from task_queue q
+                 cross join runtime_clock
+                 where q.worker_id is not null
+                   and q.lease_until is not null
+                   and q.lease_until < runtime_clock.now
+                 order by q.lease_until, q.task_id
+                 for update of q skip locked
                  limit :limit
             )
             update task_queue q
@@ -512,33 +592,24 @@ public class TaskQueueRepository {
         """
             with runtime_clock as (
                 select clock_timestamp() as now
-            ),
-            partitions as (
-                select generate_series(1, :partitionCount) as partition_num
             )
-            select p.partition_num,
-                   count(q.task_id)
-                       filter (
-                           where q.worker_id is null
-                             and q.available_at <= runtime_clock.now
-                       ) as ready_tasks,
+            select q.partition_num,
+                   count(q.task_id) as ready_tasks,
                    coalesce(
                        floor(
                            extract(
                                epoch from runtime_clock.now - min(q.created_at)
-                                   filter (
-                                       where q.worker_id is null
-                                         and q.available_at <= runtime_clock.now
-                                   )
                            )
                        ),
                        0
                    )::bigint as oldest_ready_age_seconds
-              from partitions p
-              cross join runtime_clock
-              left join task_queue q on q.partition_num = p.partition_num
-             group by p.partition_num, runtime_clock.now
-             order by p.partition_num
+              from task_queue q
+             cross join runtime_clock
+             where q.worker_id is null
+               and q.available_at <= runtime_clock.now
+               and q.partition_num between 1 and :partitionCount
+             group by q.partition_num, runtime_clock.now
+             order by q.partition_num
             """,
         new MapSqlParameterSource("partitionCount", partitionCount),
         (rs, rowNum) ->
@@ -581,7 +652,7 @@ public class TaskQueueRepository {
    * @return момент времени в представлении offset date-time (UTC)
    */
   private static OffsetDateTime toOffsetDateTime(Instant instant) {
-    return OffsetDateTime.ofInstant(instant, ZoneOffset.UTC);
+    return instant == null ? null : OffsetDateTime.ofInstant(instant, ZoneOffset.UTC);
   }
 
   /**
