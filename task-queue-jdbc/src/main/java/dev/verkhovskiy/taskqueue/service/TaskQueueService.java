@@ -4,6 +4,7 @@ import dev.verkhovskiy.taskqueue.config.TaskQueueBeanNames;
 import dev.verkhovskiy.taskqueue.config.TaskQueueProperties;
 import dev.verkhovskiy.taskqueue.domain.QueuedTask;
 import dev.verkhovskiy.taskqueue.domain.TaskEnqueueRequest;
+import dev.verkhovskiy.taskqueue.domain.TaskQueueLimits;
 import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository;
 import dev.verkhovskiy.taskqueue.persistence.WorkerRegistryRepository;
 import java.time.Duration;
@@ -17,9 +18,6 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 @RequiredArgsConstructor
 public class TaskQueueService {
-
-  private static final int MAX_TASK_TYPE_LENGTH = 128;
-  private static final int MAX_PARTITION_KEY_LENGTH = 512;
 
   private final TaskQueueRepository queueRepository;
   private final WorkerRegistryRepository workerRegistryRepository;
@@ -114,13 +112,14 @@ public class TaskQueueService {
     if (request.taskType() == null || request.taskType().isBlank()) {
       throw new IllegalArgumentException("taskType must be set");
     }
-    if (request.taskType().length() > MAX_TASK_TYPE_LENGTH) {
-      throw new IllegalArgumentException("taskType length must be <= " + MAX_TASK_TYPE_LENGTH);
+    if (request.taskType().length() > TaskQueueLimits.MAX_TASK_TYPE_LENGTH) {
+      throw new IllegalArgumentException(
+          "taskType length must be <= " + TaskQueueLimits.MAX_TASK_TYPE_LENGTH);
     }
     if (request.partitionKey() != null
-        && request.partitionKey().length() > MAX_PARTITION_KEY_LENGTH) {
+        && request.partitionKey().length() > TaskQueueLimits.MAX_PARTITION_KEY_LENGTH) {
       throw new IllegalArgumentException(
-          "partitionKey length must be <= " + MAX_PARTITION_KEY_LENGTH);
+          "partitionKey length must be <= " + TaskQueueLimits.MAX_PARTITION_KEY_LENGTH);
     }
     if (request.payload() == null) {
       throw new IllegalArgumentException("payload must be set");

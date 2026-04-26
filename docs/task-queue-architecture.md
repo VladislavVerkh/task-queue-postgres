@@ -372,6 +372,9 @@ DDL лежит в Liquibase changeset:
 - `task-queue-jdbc/src/main/resources/db/changelog/changes/005-partition-handoff-state.sql`
 - `task-queue-jdbc/src/main/resources/db/changelog/changes/007-task-queue-task-lease.sql`
 
+Java-валидация длины `task_type` и `partition_key` использует `TaskQueueLimits`, значения которого
+должны совпадать с `varchar(128)` и `varchar(512)` в DDL.
+
 Для таблиц `task_queue`, `task_worker_registry` и `task_worker_partition_assignment`
 заданы более агрессивные per-table параметры autovacuum/analyze, так как это
 high-churn таблицы (частые `insert`/`update`/`delete`).

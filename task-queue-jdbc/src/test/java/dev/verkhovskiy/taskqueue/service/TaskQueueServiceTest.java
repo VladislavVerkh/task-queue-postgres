@@ -7,6 +7,7 @@ import static org.mockito.Mockito.when;
 
 import dev.verkhovskiy.taskqueue.config.TaskQueueProperties;
 import dev.verkhovskiy.taskqueue.domain.TaskEnqueueRequest;
+import dev.verkhovskiy.taskqueue.domain.TaskQueueLimits;
 import dev.verkhovskiy.taskqueue.persistence.TaskQueueRepository;
 import dev.verkhovskiy.taskqueue.persistence.WorkerRegistryRepository;
 import java.time.Duration;
@@ -59,22 +60,26 @@ class TaskQueueServiceTest {
 
   @Test
   void rejectsTooLongTaskTypeBeforeSql() {
-    TaskEnqueueRequest request = new TaskEnqueueRequest("x".repeat(129), "key", "{}", null);
+    TaskEnqueueRequest request =
+        new TaskEnqueueRequest(
+            "x".repeat(TaskQueueLimits.MAX_TASK_TYPE_LENGTH + 1), "key", "{}", null);
 
     assertThatThrownBy(() -> queueService.enqueue(request))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessage("taskType length must be <= 128");
+        .hasMessage("taskType length must be <= " + TaskQueueLimits.MAX_TASK_TYPE_LENGTH);
 
     verifyNoInteractions(queueRepository, partitioner, taskIdGenerator);
   }
 
   @Test
   void rejectsTooLongPartitionKeyBeforeSql() {
-    TaskEnqueueRequest request = new TaskEnqueueRequest("type", "x".repeat(513), "{}", null);
+    TaskEnqueueRequest request =
+        new TaskEnqueueRequest(
+            "type", "x".repeat(TaskQueueLimits.MAX_PARTITION_KEY_LENGTH + 1), "{}", null);
 
     assertThatThrownBy(() -> queueService.enqueue(request))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessage("partitionKey length must be <= 512");
+        .hasMessage("partitionKey length must be <= " + TaskQueueLimits.MAX_PARTITION_KEY_LENGTH);
 
     verifyNoInteractions(queueRepository, partitioner, taskIdGenerator);
   }
